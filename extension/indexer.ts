@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-const SCHEMA_VERSION = "1";
+const SCHEMA_VERSION = "2";
 const MAX_CHUNK_CHARS = 16_000;
 
 export interface SyncProgress {
@@ -187,7 +187,8 @@ export class SessionIndex {
         session_path UNINDEXED,
         entry_id UNINDEXED,
         role UNINDEXED,
-        tokenize = 'porter unicode61'
+        tokenize = 'porter unicode61',
+        prefix = '2 3 4'
       );
     `);
     this.db

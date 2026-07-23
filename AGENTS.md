@@ -17,8 +17,22 @@ See README.md for usage and architecture.
 - Cross-project open uses `ctx.switchSession(path)`; pi rebinds cwd/tools/trust
   to the session's stored cwd. Missing-directory errors are caught and shown.
 
+- `node:sqlite` quirk: `WHERE chunks MATCH ? AND rowid = ?` mis-plans (ignores
+  the rowid constraint). Snippets are therefore built in JS from plain rowid
+  text lookups — do not reintroduce FTS `snippet()` per session.
+- Search runs synchronously on every keystroke; FTS prefix indexes
+  (`prefix='2 3 4'`) keep worst-case latency ~60ms. Re-measure with
+  `test/smoke.ts` if changing the schema or query shape.
+- Extension code must stay Node strip-types compatible (no parameter
+  properties/enums) so tests run with plain `node`; relative imports need
+  explicit `.ts` extensions.
+
 ## Testing
 
 - `node test/smoke.ts [query]` — indexes real `~/.pi/agent/sessions` into a temp
   DB, checks incremental sync is a no-op, prints top hits. No pi required.
+- `node test/panel.ts` — unit tests: match-query building, JS snippets, results
+  list rendering, live panel keystroke handling. Needs the
+  `node_modules/@earendil-works` symlinks (pi-coding-agent, pi-tui) to resolve
+  pi imports outside pi.
 - Manual: run `pi` anywhere and use `/search`.

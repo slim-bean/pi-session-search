@@ -11,16 +11,21 @@ session's original directory, so it behaves exactly like resuming from that fold
 ## Usage
 
 ```
-/search <query>             search all sessions (interactive picker)
+/search [query]             open the live search panel (optionally prefilled)
 /search "exact phrase" word quoted phrases + AND'd terms (FTS5 syntax-safe)
-/search --rebuild <query>   drop and rebuild the index first
+/search --rebuild           drop and rebuild the index first
 ```
 
-In the results picker:
+The panel searches on **every keystroke**; words match as prefixes while you
+type (`sess sear` finds "session search"), quoted phrases match exactly. An
+empty query shows the most recent sessions.
 
-- `↑`/`↓` (or `j`/`k`) — navigate
+Keys:
+
+- type — refine the search
+- `↑`/`↓` (or `Ctrl+P`/`Ctrl+N`) — navigate results
 - `Enter` — open the session in the current pi (cross-project resume)
-- `c` — copy `cd <dir> && pi --session <file>` to the clipboard for a new terminal
+- `Tab` — copy `cd <dir> && pi --session <file>` to the clipboard for a new terminal
 - `Esc` — cancel
 
 ## Install
@@ -44,7 +49,9 @@ Then `/reload` (or restart pi). No npm install needed — zero dependencies.
   only changed sessions are re-parsed. Full build of ~270 sessions (~200MB) takes
   ~2s; subsequent syncs are milliseconds.
 - **Ranking**: BM25 per chunk, grouped by session (best chunk wins), with
-  highlighted snippets.
+  highlighted snippets built in JS around the first match.
+- **Live typing**: FTS5 prefix indexes (`prefix='2 3 4'`) keep worst-case
+  keystroke latency around ~60ms even for very common short tokens.
 
 ## Layout
 
@@ -56,6 +63,8 @@ extension/
 test/
   smoke.ts     indexes real sessions into a temp DB and runs sample queries
                (node test/smoke.ts [query])
+  panel.ts     unit tests for query building, snippets, results list, and the
+               live panel key handling (node test/panel.ts)
 ```
 
 ## Roadmap

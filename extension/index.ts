@@ -1,11 +1,12 @@
 /**
  * pi-session-search: centralized full-text search over all pi sessions.
  *
- * /search <query>            - search every session across all projects
- * /search --rebuild <query>  - drop and rebuild the index first
+ * /search [query]            - live search panel over every session
+ * /search --rebuild [query]  - drop and rebuild the index first
  *
+ * The panel searches on every keystroke (last word matched as a prefix).
  * Enter opens the selected session in the current pi (pi rebinds cwd, tools,
- * and trust to the session's original directory). `c` copies a
+ * and trust to the session's original directory). Tab copies a
  * `cd <dir> && pi --session <file>` command for a new terminal.
  */
 import { spawnSync } from "node:child_process";
@@ -13,13 +14,22 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
-import { Container, Text, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import {
+  Container,
+  Input,
+  Text,
+  matchesKey,
+  truncateToWidth,
+  type Focusable,
+  type TUI,
+} from "@earendil-works/pi-tui";
 import { SessionIndex, defaultSessionsRoot } from "./indexer.ts";
-import { HL_END, HL_START, search, type SearchHit } from "./search.ts";
+import { HL_END, HL_START, recentSessions, search, type SearchHit } from "./search.ts";
 
 const STATUS_KEY = "session-search";
 const RESULT_LIMIT = 20;
 const MAX_VISIBLE = 5;
+const MIN_QUERY_LENGTH = 2;
 
 type PickAction = { type: "open" | "copy"; hit: SearchHit } | null;
 
@@ -68,43 +78,42 @@ function copyToClipboard(text: string): boolean {
   return false;
 }
 
-export class ResultsPicker {
+/** Scrollable results list. Navigation is driven by the parent panel. */
+export class ResultsList {
+  private hits: SearchHit[] = [];
   private selected = 0;
   private scroll = 0;
-
-  private readonly hits: SearchHit[];
   private readonly theme: MiniTheme;
-  private readonly done: (result: PickAction) => void;
   private readonly currentSessionPath: string | undefined;
 
-  constructor(
-    hits: SearchHit[],
-    theme: MiniTheme,
-    done: (result: PickAction) => void,
-    currentSessionPath: string | undefined,
-  ) {
-    this.hits = hits;
+  constructor(theme: MiniTheme, currentSessionPath: string | undefined) {
     this.theme = theme;
-    this.done = done;
     this.currentSessionPath = currentSessionPath;
   }
 
-  handleInput(data: string): void {
-    if (matchesKey(data, "up") || matchesKey(data, "ctrl+p") || data === "k") {
-      if (this.selected > 0) this.selected--;
-    } else if (matchesKey(data, "down") || matchesKey(data, "ctrl+n") || data === "j") {
-      if (this.selected < this.hits.length - 1) this.selected++;
-    } else if (matchesKey(data, "enter")) {
-      this.done({ type: "open", hit: this.hits[this.selected]! });
-    } else if (data === "c") {
-      this.done({ type: "copy", hit: this.hits[this.selected]! });
-    } else if (matchesKey(data, "escape")) {
-      this.done(null);
-    }
+  setHits(hits: SearchHit[]): void {
+    this.hits = hits;
+    this.selected = 0;
+    this.scroll = 0;
+  }
+
+  getSelected(): SearchHit | undefined {
+    return this.hits[this.selected];
+  }
+
+  moveUp(): void {
+    if (this.selected > 0) this.selected--;
+  }
+
+  moveDown(): void {
+    if (this.selected < this.hits.length - 1) this.selected++;
   }
 
   render(width: number): string[] {
     const theme = this.theme;
+    if (this.hits.length === 0) {
+      return [truncateToWidth(theme.fg("dim", "  no matches"), width)];
+    }
     if (this.selected < this.scroll) this.scroll = this.selected;
     if (this.selected >= this.scroll + MAX_VISIBLE) this.scroll = this.selected - MAX_VISIBLE + 1;
 
@@ -122,7 +131,8 @@ export class ResultsPicker {
       const rawTitle = (hit.name ?? hit.firstMessage ?? "(empty session)").replace(/\s+/g, " ").trim();
       const isCurrent = hit.path === this.currentSessionPath;
       const currentPlain = isCurrent ? " (current)" : "";
-      const metaPlain = `  ${formatDate(hit.createdAt ?? hit.modifiedAt)} · ${hit.messageCount} msgs · ${hit.hits} hit${hit.hits === 1 ? "" : "s"}`;
+      const hitsPlain = hit.hits > 0 ? ` · ${hit.hits} hit${hit.hits === 1 ? "" : "s"}` : "";
+      const metaPlain = `  ${formatDate(hit.createdAt ?? hit.modifiedAt)} · ${hit.messageCount} msgs${hitsPlain}`;
       const avail = Math.max(20, width - 2 - currentPlain.length - metaPlain.length);
       const title = rawTitle.length > avail ? rawTitle.slice(0, avail - 1) + "…" : rawTitle;
       const current = isCurrent ? theme.fg("warning", currentPlain) : "";
@@ -147,6 +157,108 @@ export class ResultsPicker {
 
   invalidate(): void {
     // stateless render: nothing cached
+  }
+}
+
+export interface SearchPanelOptions {
+  theme: MiniTheme;
+  tui?: Pick<TUI, "requestRender">;
+  initialQuery?: string;
+  currentSessionPath?: string;
+  /** Returns hits for a query ("" = recent sessions). */
+  runSearch: (query: string) => SearchHit[];
+  done: (result: PickAction) => void;
+}
+
+/**
+ * Live search panel: an input on top, results below, re-queried on every
+ * keystroke. Implements Focusable so the terminal/IME cursor tracks the input.
+ */
+export class SearchPanel extends Container implements Focusable {
+  private readonly input: Input;
+  private readonly list: ResultsList;
+  private readonly countText: Text;
+  private readonly options: SearchPanelOptions;
+  private lastQuery: string;
+
+  private _focused = false;
+  get focused(): boolean {
+    return this._focused;
+  }
+  set focused(value: boolean) {
+    this._focused = value;
+    this.input.focused = value;
+  }
+
+  constructor(options: SearchPanelOptions) {
+    super();
+    this.options = options;
+    const theme = options.theme;
+
+    this.input = new Input();
+    this.input.setValue(options.initialQuery ?? "");
+    this.input.onSubmit = () => {
+      const hit = this.list.getSelected();
+      if (hit) options.done({ type: "open", hit });
+    };
+    this.input.onEscape = () => options.done(null);
+
+    this.list = new ResultsList(theme, options.currentSessionPath);
+    this.countText = new Text("", 1, 0);
+
+    this.addChild(new DynamicBorder((s: string) => theme.fg("border", s)));
+    this.addChild(this.countText);
+    this.addChild(this.input);
+    this.addChild(new Text("", 0, 0));
+    this.addChild(this.list);
+    this.addChild(
+      new Text(theme.fg("dim", "↑↓ navigate · enter open here · tab copy resume command · esc cancel"), 1, 0),
+    );
+    this.addChild(new DynamicBorder((s: string) => theme.fg("border", s)));
+
+    this.lastQuery = this.input.getValue();
+    this.refresh();
+  }
+
+  getQuery(): string {
+    return this.input.getValue();
+  }
+
+  private refresh(): void {
+    const theme = this.options.theme;
+    const query = this.input.getValue();
+    const hits = this.options.runSearch(query);
+    this.list.setHits(hits);
+    const label = query.trim()
+      ? `${hits.length} result${hits.length === 1 ? "" : "s"}`
+      : "recent sessions · type to search";
+    this.countText.setText(
+      theme.fg("accent", theme.bold("Session search")) + theme.fg("muted", `  ·  ${label}`),
+    );
+  }
+
+  handleInput(data: string): void {
+    if (matchesKey(data, "up") || matchesKey(data, "ctrl+p")) {
+      this.list.moveUp();
+    } else if (matchesKey(data, "down") || matchesKey(data, "ctrl+n")) {
+      this.list.moveDown();
+    } else if (matchesKey(data, "tab")) {
+      const hit = this.list.getSelected();
+      if (hit) this.options.done({ type: "copy", hit });
+    } else {
+      this.input.handleInput(data);
+      const query = this.input.getValue();
+      if (query !== this.lastQuery) {
+        this.lastQuery = query;
+        this.refresh();
+      }
+    }
+    this.options.tui?.requestRender();
+  }
+
+  override invalidate(): void {
+    super.invalidate();
+    this.refresh(); // rebuild pre-baked theme strings (theme may have changed)
   }
 }
 
@@ -177,10 +289,6 @@ export default function (pi: ExtensionAPI) {
         rebuild = true;
         query = query.slice("--rebuild".length).trim();
       }
-      if (!query) {
-        query = ((await ctx.ui.input("Search sessions:")) ?? "").trim();
-      }
-      if (!query) return;
 
       const idx = getIndex();
       if (rebuild) idx.reset();
@@ -197,45 +305,28 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.setStatus(STATUS_KEY, undefined);
       }
 
-      let hits: SearchHit[];
-      try {
-        hits = search(idx, query, RESULT_LIMIT);
-      } catch (error: any) {
-        ctx.ui.notify(`Search failed: ${error?.message ?? error}`, "error");
-        return;
-      }
-      if (hits.length === 0) {
-        ctx.ui.notify(`No sessions matching "${query}"`, "info");
-        return;
-      }
-
       const currentSession = ctx.sessionManager.getSessionFile();
-      const action = await ctx.ui.custom<PickAction>((tui, theme, _keybindings, done) => {
-        const container = new Container();
-        container.addChild(new DynamicBorder((s: string) => theme.fg("border", s)));
-        container.addChild(
-          new Text(
-            theme.fg("accent", theme.bold("Session search")) +
-              theme.fg("muted", `  ${query}  ·  ${hits.length} result${hits.length === 1 ? "" : "s"}`),
-            1,
-            0,
-          ),
-        );
-        const picker = new ResultsPicker(hits, theme, done, currentSession);
-        container.addChild(picker);
-        container.addChild(
-          new Text(theme.fg("dim", "↑↓ navigate · enter open here · c copy resume command · esc cancel"), 1, 0),
-        );
-        container.addChild(new DynamicBorder((s: string) => theme.fg("border", s)));
-        return {
-          render: (width: number) => container.render(width),
-          invalidate: () => container.invalidate(),
-          handleInput: (data: string) => {
-            picker.handleInput(data);
-            tui.requestRender();
-          },
-        };
-      });
+      const runSearch = (input: string): SearchHit[] => {
+        try {
+          const trimmed = input.trim();
+          if (trimmed.length < MIN_QUERY_LENGTH) return recentSessions(idx, RESULT_LIMIT);
+          return search(idx, trimmed, RESULT_LIMIT, { prefix: true });
+        } catch {
+          return []; // transient FTS syntax edge while typing
+        }
+      };
+
+      const action = await ctx.ui.custom<PickAction>(
+        (tui, theme, _keybindings, done) =>
+          new SearchPanel({
+            theme,
+            tui,
+            initialQuery: query,
+            currentSessionPath: currentSession,
+            runSearch,
+            done,
+          }),
+      );
 
       if (!action) return;
 
