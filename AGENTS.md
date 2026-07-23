@@ -1,6 +1,6 @@
 # Agent notes
 
-pi extension providing `/search` — global full-text search over all pi sessions.
+pi extension providing `/session-search` — global full-text search over all pi sessions.
 See README.md for usage and architecture.
 
 ## Key facts
@@ -10,7 +10,7 @@ See README.md for usage and architecture.
 - Installed by symlink: `~/.pi/agent/extensions/session-search -> ./extension`.
   After edits, run `/reload` in pi to pick up changes.
 - Index DB: `~/.pi/agent/session-search/index.db`. Safe to delete anytime
-  (rebuilt on next `/search`). Schema changes: bump `SCHEMA_VERSION` in
+  (rebuilt on next `/session-search`). Schema changes: bump `SCHEMA_VERSION` in
   `extension/indexer.ts` — old data is dropped automatically.
 - Session file format: see pi docs `docs/session-format.md`
   (`/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/docs/`).
@@ -35,4 +35,4 @@ See README.md for usage and architecture.
   list rendering, live panel keystroke handling. Needs the
   `node_modules/@earendil-works` symlinks (pi-coding-agent, pi-tui) to resolve
   pi imports outside pi.
-- Manual: run `pi` anywhere and use `/search`.
+- Manual: run `pi` anywhere and use `/session-search`.

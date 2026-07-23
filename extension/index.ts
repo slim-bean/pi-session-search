@@ -1,8 +1,8 @@
 /**
  * pi-session-search: centralized full-text search over all pi sessions.
  *
- * /search [query]            - live search panel over every session
- * /search --rebuild [query]  - drop and rebuild the index first
+ * /session-search [query]            - live search panel over every session
+ * /session-search --rebuild [query]  - drop and rebuild the index first
  *
  * The panel searches on every keystroke (last word matched as a prefix).
  * Enter opens the selected session in the current pi (pi rebinds cwd, tools,
@@ -275,11 +275,11 @@ export default function (pi: ExtensionAPI) {
     index = undefined;
   });
 
-  pi.registerCommand("search", {
+  pi.registerCommand("session-search", {
     description: "Search all pi sessions across every project (--rebuild to reindex)",
     handler: async (args, ctx) => {
       if (ctx.mode !== "tui") {
-        ctx.ui.notify("/search requires interactive mode", "error");
+        ctx.ui.notify("/session-search requires interactive mode", "error");
         return;
       }
 

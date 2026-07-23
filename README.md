@@ -4,16 +4,16 @@ Centralized full-text search over **all** pi sessions, from any pi session.
 
 pi stores sessions per-project under `~/.pi/agent/sessions/--<escaped-cwd>--/*.jsonl`,
 and the built-in `/resume` only sees the current project. This extension indexes
-every session across every project and exposes a `/search` command that can open
+every session across every project and exposes a `/session-search` command that can open
 any result in place — pi rebinds cwd, tools, trust, and project config to the
 session's original directory, so it behaves exactly like resuming from that folder.
 
 ## Usage
 
 ```
-/search [query]             open the live search panel (optionally prefilled)
-/search "exact phrase" word quoted phrases + AND'd terms (FTS5 syntax-safe)
-/search --rebuild           drop and rebuild the index first
+/session-search [query]             open the live search panel (optionally prefilled)
+/session-search "exact phrase" word quoted phrases + AND'd terms (FTS5 syntax-safe)
+/session-search --rebuild           drop and rebuild the index first
 ```
 
 The panel searches on **every keystroke**; words match as prefixes while you
@@ -45,7 +45,7 @@ Then `/reload` (or restart pi). No npm install needed — zero dependencies.
 - **What's indexed**: user messages, assistant text, extension messages,
   compaction/branch summaries, session names, and the session's folder path.
   Tool output and thinking blocks are excluded to keep the index small.
-- **Incremental sync**: on each `/search`, files are compared by mtime + size and
+- **Incremental sync**: on each `/session-search`, files are compared by mtime + size and
   only changed sessions are re-parsed. Full build of ~270 sessions (~200MB) takes
   ~2s; subsequent syncs are milliseconds.
 - **Ranking**: BM25 per chunk, grouped by session (best chunk wins), with
@@ -57,7 +57,7 @@ Then `/reload` (or restart pi). No npm install needed — zero dependencies.
 
 ```
 extension/
-  index.ts     extension entry: /search command + results picker UI
+  index.ts     extension entry: /session-search command + results picker UI
   indexer.ts   SQLite FTS5 schema, session JSONL parsing, incremental sync
   search.ts    MATCH query building + grouped BM25 search
 test/
