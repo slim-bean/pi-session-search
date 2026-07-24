@@ -7,8 +7,10 @@ See README.md for usage and architecture.
 
 - Zero npm dependencies. Uses `node:sqlite` (FTS5) — requires the Node pi runs on
   to be ≥ 22. TypeScript is loaded by pi via jiti; no build step.
-- Installed by symlink: `~/.pi/agent/extensions/session-search -> ./extension`.
-  After edits, run `/reload` in pi to pick up changes.
+- Installable as a pi package (`package.json` has the `pi` manifest pointing at
+  `./extension/index.ts`; pi deps are `peerDependencies` per docs/packages.md).
+  Locally installed by symlink: `~/.pi/agent/extensions/session-search ->
+  ./extension`. After edits, run `/reload` in pi to pick up changes.
 - Index DB: `~/.pi/agent/session-search/index.db`. Safe to delete anytime
   (rebuilt on next `/session-search`). Schema changes: bump `SCHEMA_VERSION` in
   `extension/indexer.ts` — old data is dropped automatically.

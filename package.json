@@ -1,0 +1,23 @@
+{
+  "name": "pi-session-search",
+  "version": "0.1.0",
+  "description": "Centralized full-text search over all pi sessions, from any pi session (/session-search)",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "search",
+    "sessions",
+    "full-text-search",
+    "fts5"
+  ],
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./extension/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}

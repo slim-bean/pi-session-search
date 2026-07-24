@@ -30,13 +30,21 @@ Keys:
 
 ## Install
 
-Symlink the `extension/` directory into pi's global extensions dir:
+As a pi package (recommended — works for git remotes and local checkouts):
+
+```bash
+pi install git:github.com/<user>/pi-session-search   # from a git remote
+pi install /path/to/pi-session-search                 # from a local checkout
+```
+
+Or for development, symlink the `extension/` directory into pi's global
+extensions dir (don't combine with `pi install`, or the command loads twice):
 
 ```bash
 ln -sfn "$(pwd)/extension" ~/.pi/agent/extensions/session-search
 ```
 
-Then `/reload` (or restart pi). No npm install needed — zero dependencies.
+Then `/reload` (or restart pi). No npm install needed — zero runtime dependencies.
 
 ## How it works
 
