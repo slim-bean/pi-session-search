@@ -33,7 +33,7 @@ Keys:
 As a pi package (recommended — works for git remotes and local checkouts):
 
 ```bash
-pi install git:github.com/<user>/pi-session-search   # from a git remote
+pi install git:github.com/slim-bean/pi-session-search   # from the git remote
 pi install /path/to/pi-session-search                 # from a local checkout
 ```
 
