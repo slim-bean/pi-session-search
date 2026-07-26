@@ -8,7 +8,10 @@ See README.md for usage and architecture.
 - Zero npm dependencies. Uses `node:sqlite` (FTS5) — requires the Node pi runs on
   to be ≥ 22. TypeScript is loaded by pi via jiti; no build step.
 - Installable as a pi package (`package.json` has the `pi` manifest pointing at
-  `./extension/index.ts`; pi deps are `peerDependencies` per docs/packages.md).
+  `./extension/index.ts`; pi deps are `peerDependencies` marked `optional` in
+  `peerDependenciesMeta`, per docs/packages.md — pi injects them via loader
+  aliases, and without the `optional` marker npm ≥ 7 auto-installs a second,
+  unused pi tree (~300 MB) on every `pi install git:`).
   **Currently installed as a local package**: `"../../projects/pi-session-search"`
   in `~/.pi/agent/settings.json` `packages` (paths resolve relative to that
   file), loaded in place. A symlink in `~/.pi/agent/extensions/` is the
