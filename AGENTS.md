@@ -9,8 +9,11 @@ See README.md for usage and architecture.
   to be ≥ 22. TypeScript is loaded by pi via jiti; no build step.
 - Installable as a pi package (`package.json` has the `pi` manifest pointing at
   `./extension/index.ts`; pi deps are `peerDependencies` per docs/packages.md).
-  Locally installed by symlink: `~/.pi/agent/extensions/session-search ->
-  ./extension`. After edits, run `/reload` in pi to pick up changes.
+  **Currently installed as a local package**: `"../../projects/pi-session-search"`
+  in `~/.pi/agent/settings.json` `packages` (paths resolve relative to that
+  file), loaded in place. A symlink in `~/.pi/agent/extensions/` is the
+  alternative — never both, or the command becomes `/session-search:1` and
+  `/session-search:2`. After edits, run `/reload` in pi to pick up changes.
 - Index DB: `~/.pi/agent/session-search/index.db`. Safe to delete anytime
   (rebuilt on next `/session-search`). Schema changes: bump `SCHEMA_VERSION` in
   `extension/indexer.ts` — old data is dropped automatically.

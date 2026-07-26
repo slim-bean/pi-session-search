@@ -37,8 +37,19 @@ pi install git:github.com/slim-bean/pi-session-search   # from the git remote
 pi install /path/to/pi-session-search                 # from a local checkout
 ```
 
-Or for development, symlink the `extension/` directory into pi's global
-extensions dir (don't combine with `pi install`, or the command loads twice):
+That records the source in `~/.pi/agent/settings.json`; a hand-written entry
+works the same, with paths resolved relative to the settings file:
+
+```json
+{ "packages": ["../../projects/pi-session-search"] }
+```
+
+A local path is loaded in place, so edits apply on the next `/reload` — no
+reinstall needed. `pi list` shows what is configured.
+
+Alternatively, symlink the `extension/` directory into pi's global extensions
+dir. Pick one mechanism, not both, or the command loads twice as
+`/session-search:1` and `/session-search:2`:
 
 ```bash
 ln -sfn "$(pwd)/extension" ~/.pi/agent/extensions/session-search
