@@ -29,7 +29,7 @@ function makeHits(n: number): SearchHit[] {
     messageCount: 10 + i,
     hits: 3,
     bestRank: -i,
-    snippets: [{ role: "user", text: `some ${HL_START}match${HL_END} in session ${i}` }],
+    snippets: [{ role: "user", text: `some ${HL_START}match${HL_END} in session ${i}`, entryIndex: 40 + i }],
   }));
 }
 
@@ -62,6 +62,8 @@ assert(
   assert(out.includes("named session"), "session name shown");
   assert(out.includes("«match»"), "highlight markers converted");
   assert(!out.includes(HL_START), "no raw markers");
+  assert(out.includes("[user #40]"), "snippet labelled with entry index");
+  assert(out.includes("session_read"), "footer points at session_read");
   assert(out.includes("(current session)"), "current session marked");
   assert(out.includes(resumeCommand(toolHits[0]!)), "resume command included");
   assert(out.includes("3 matching chunks"), "chunk count shown");

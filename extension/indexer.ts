@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-const SCHEMA_VERSION = "2";
+const SCHEMA_VERSION = "3";
 const MAX_CHUNK_CHARS = 16_000;
 
 export interface SyncProgress {
@@ -27,6 +27,8 @@ export interface SyncResult {
 
 interface Chunk {
   entryId: string;
+  /** 1-based ordinal of the entry in file order — matches reader.ts numbering. */
+  entryIndex: number;
   role: string;
   text: string;
 }
@@ -96,6 +98,10 @@ export function parseSessionFile(path: string): ParsedSession | null {
     chunks: [],
   };
 
+  // Entry ordinal: every successfully parsed entry line after the header
+  // counts, regardless of type. reader.ts counts identically so that
+  // chunks.entry_index lines up with session_read's #indices.
+  let ordinal = 0;
   for (let i = headerIdx + 1; i < lines.length; i++) {
     const line = lines[i]!.trim();
     if (!line) continue;
@@ -105,6 +111,7 @@ export function parseSessionFile(path: string): ParsedSession | null {
     } catch {
       continue; // skip corrupt lines
     }
+    ordinal++;
 
     const id = typeof entry.id === "string" ? entry.id : "";
     switch (entry.type) {
@@ -116,23 +123,23 @@ export function parseSessionFile(path: string): ParsedSession | null {
           const text = textFromContent(msg.content).trim();
           if (text) {
             if (!parsed.firstMessage) parsed.firstMessage = text.slice(0, 300);
-            parsed.chunks.push({ entryId: id, role: "user", text: clip(text) });
+            parsed.chunks.push({ entryId: id, entryIndex: ordinal, role: "user", text: clip(text) });
           }
         } else if (msg.role === "assistant") {
           const text = textFromContent(msg.content).trim(); // text blocks only (skips thinking/toolCall)
-          if (text) parsed.chunks.push({ entryId: id, role: "assistant", text: clip(text) });
+          if (text) parsed.chunks.push({ entryId: id, entryIndex: ordinal, role: "assistant", text: clip(text) });
         }
         break;
       }
       case "custom_message": {
         const text = textFromContent(entry.content).trim();
-        if (text) parsed.chunks.push({ entryId: id, role: "custom", text: clip(text) });
+        if (text) parsed.chunks.push({ entryId: id, entryIndex: ordinal, role: "custom", text: clip(text) });
         break;
       }
       case "compaction":
       case "branch_summary": {
         const text = typeof entry.summary === "string" ? entry.summary.trim() : "";
-        if (text) parsed.chunks.push({ entryId: id, role: "summary", text: clip(text) });
+        if (text) parsed.chunks.push({ entryId: id, entryIndex: ordinal, role: "summary", text: clip(text) });
         break;
       }
       case "session_info": {
@@ -186,6 +193,7 @@ export class SessionIndex {
         text,
         session_path UNINDEXED,
         entry_id UNINDEXED,
+        entry_index UNINDEXED,
         role UNINDEXED,
         tokenize = 'porter unicode61',
         prefix = '2 3 4'
@@ -291,12 +299,12 @@ export class SessionIndex {
           parsed.messageCount,
         );
       const insert = this.db.prepare(
-        `INSERT INTO chunks (text, session_path, entry_id, role) VALUES (?, ?, ?, ?)`,
+        `INSERT INTO chunks (text, session_path, entry_id, entry_index, role) VALUES (?, ?, ?, ?, ?)`,
       );
       // Meta chunk so folder names and session names are searchable.
-      insert.run([parsed.name, parsed.cwd, basename(path)].filter(Boolean).join(" "), path, "", "meta");
+      insert.run([parsed.name, parsed.cwd, basename(path)].filter(Boolean).join(" "), path, "", 0, "meta");
       for (const chunk of parsed.chunks) {
-        insert.run(chunk.text, path, chunk.entryId, chunk.role);
+        insert.run(chunk.text, path, chunk.entryId, chunk.entryIndex, chunk.role);
       }
       this.db.exec("COMMIT");
     } catch (error) {

@@ -2,6 +2,7 @@
  * pi-session-search: centralized full-text search over all pi sessions.
  *
  * `session_search` tool               - lets the LLM search past sessions
+ * `session_read` tool                 - outline/read/search inside one session
  * /session-search [query]            - live search panel over every session
  * /session-search --rebuild [query]  - drop and rebuild the index first
  *
@@ -24,8 +25,20 @@ import {
   type TUI,
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { formatDate, formatHits, prettyPath, resumeCommand } from "./format.ts";
+import {
+  FIND_LIMIT,
+  OUTLINE_LIMIT,
+  READ_BUDGET,
+  formatDate,
+  formatEntriesRead,
+  formatHits,
+  formatOverview,
+  formatSessionMatches,
+  prettyPath,
+  resumeCommand,
+} from "./format.ts";
 import { SessionIndex, defaultSessionsRoot } from "./indexer.ts";
+import { loadSessionFile, parseEntryRanges, resolveSessionPath } from "./reader.ts";
 import { HL_END, HL_START, recentSessions, search, type SearchHit } from "./search.ts";
 
 const STATUS_KEY = "session-search";
@@ -271,8 +284,9 @@ export default function (pi: ExtensionAPI) {
       "Matches user messages, assistant replies, compaction summaries, session names, and " +
       "project paths (tool output and thinking are not indexed). Terms are AND'd and " +
       'porter-stemmed; "quoted phrases" match exactly. An empty query lists the most recent ' +
-      "sessions. Each result includes the project directory, matching snippets, and a " +
-      "`cd <dir> && pi --session <file>` resume command.",
+      "sessions. Each result includes the project directory, matching snippets labelled with " +
+      "entry #indices (readable via session_read), and a `cd <dir> && pi --session <file>` " +
+      "resume command.",
     promptSnippet:
       "Search the user's past pi sessions across all projects (full-text over messages and summaries)",
     promptGuidelines: [
@@ -314,6 +328,103 @@ export default function (pi: ExtensionAPI) {
             messageCount: hit.messageCount,
             hits: hit.hits,
           })),
+        },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "session_read",
+    label: "Session Read",
+    description:
+      "Read one pi session file (use the path from session_search results). Modes: " +
+      "(1) default — overview: session metadata plus a paginated outline, one line per entry " +
+      "(#index, kind, size, preview); " +
+      '(2) entries:"40-45,52" — full text of those entries, including tool calls, tool output, ' +
+      "and thinking, under a maxChars budget with continuation hints; " +
+      '(3) query:"…" — find entries whose full text contains every term (case-insensitive; ' +
+      "scans tool output and thinking, which session_search does not index). " +
+      "session_search snippets are labelled with #indices — read around them with entries.",
+    promptSnippet:
+      "Outline, read, or search inside a single pi session file (follow-up to session_search)",
+    promptGuidelines: [
+      'Use session_read to inspect a session found via session_search: read entries:"N-M" around a snippet\'s #index, or get an outline first; read ranges instead of whole sessions.',
+    ],
+    parameters: Type.Object({
+      path: Type.String({
+        description: "Session .jsonl file path (from session_search results).",
+      }),
+      entries: Type.Optional(
+        Type.String({
+          description: 'Entry indices to read in full, e.g. "12", "40-45,52", "100-" (to end).',
+        }),
+      ),
+      query: Type.Optional(
+        Type.String({
+          description:
+            'Find entries containing every term ("quoted phrases" ok); scans full text including tool output.',
+        }),
+      ),
+      offset: Type.Optional(
+        Type.Integer({ minimum: 0, description: "Pagination offset for outline/matches (default 0)." }),
+      ),
+      limit: Type.Optional(
+        Type.Integer({
+          minimum: 1,
+          maximum: 500,
+          description: `Outline lines (default ${OUTLINE_LIMIT}) or query matches (default ${FIND_LIMIT}) per page.`,
+        }),
+      ),
+      maxChars: Type.Optional(
+        Type.Integer({
+          minimum: 1000,
+          maximum: 50000,
+          description: `Char budget for entries mode (default ${READ_BUDGET}).`,
+        }),
+      ),
+      offsetChars: Type.Optional(
+        Type.Integer({
+          minimum: 0,
+          description: "Continue a single truncated entry from this char offset (entries mode, one entry only).",
+        }),
+      ),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (params.entries && params.query?.trim()) {
+        throw new Error("Pass either entries or query, not both.");
+      }
+      const path = resolveSessionPath(params.path, ctx.cwd);
+      const session = loadSessionFile(path);
+
+      let mode: "overview" | "read" | "find";
+      let text: string;
+      if (params.entries) {
+        mode = "read";
+        const indices = parseEntryRanges(params.entries, session.entries.length);
+        text = formatEntriesRead(session, indices, {
+          maxChars: params.maxChars,
+          offsetChars: params.offsetChars,
+        });
+      } else if (params.query?.trim()) {
+        mode = "find";
+        text = formatSessionMatches(session, params.query.trim(), {
+          offset: params.offset,
+          limit: params.limit,
+        });
+      } else {
+        mode = "overview";
+        text = formatOverview(session, { offset: params.offset, limit: params.limit });
+      }
+
+      return {
+        content: [{ type: "text", text }],
+        details: {
+          mode,
+          path,
+          name: session.name,
+          cwd: session.cwd,
+          entryCount: session.entries.length,
+          messageCount: session.messageCount,
         },
       };
     },

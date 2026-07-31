@@ -1,6 +1,6 @@
 {
   "name": "pi-session-search",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Centralized full-text search over all pi sessions, from any pi session (/session-search)",
   "license": "MIT",
   "keywords": [

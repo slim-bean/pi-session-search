@@ -1,8 +1,9 @@
 # Agent notes
 
-pi extension providing `/session-search` (live panel) and the `session_search`
-tool (LLM-callable) — global full-text search over all pi sessions.
-See README.md for usage and architecture.
+pi extension providing `/session-search` (live panel) plus two LLM-callable
+tools: `session_search` (global full-text search over all pi sessions) and
+`session_read` (outline / read entry ranges / search inside one session
+without dumping it into context). See README.md for usage and architecture.
 
 ## Key facts
 
@@ -11,7 +12,14 @@ See README.md for usage and architecture.
   step. `typebox` (tool parameter schema) is injected by pi via loader aliases,
   like the pi peer deps.
 - The `session_search` tool and the panel share one `SessionIndex` and the same
-  incremental sync; tool output text lives in `extension/format.ts`.
+  incremental sync; all LLM-facing output text lives in `extension/format.ts`.
+- **Ordinal invariant**: `indexer.parseSessionFile` and `reader.loadSessionFile`
+  must count entry ordinals identically (every successfully parsed entry line
+  after the header; corrupt lines skipped). `chunks.entry_index` is what makes
+  `session_search` snippet `#index` labels addressable via `session_read`
+  `entries:`. `test/reader.ts` asserts the alignment — keep both loops in sync.
+- `session_read` reads the session file directly (no index); `reader.ts` renders
+  tool calls/output and thinking, which the FTS index deliberately excludes.
 - Installable as a pi package (`package.json` has the `pi` manifest pointing at
   `./extension/index.ts`; pi deps are `peerDependencies` marked `optional` in
   `peerDependenciesMeta`, per docs/packages.md — pi injects them via loader
@@ -48,4 +56,7 @@ See README.md for usage and architecture.
   output formatting, results list rendering, live panel keystroke handling.
   Needs the `node_modules` symlinks (@earendil-works/pi-coding-agent,
   @earendil-works/pi-tui, typebox) to resolve pi imports outside pi.
+- `node test/reader.ts` — unit tests: session reader rendering, entry range
+  parsing, read budgets/continuation hints, in-session find, and
+  indexer↔reader ordinal alignment. No pi imports needed.
 - Manual: run `pi` anywhere and use `/session-search`.

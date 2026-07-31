@@ -19,7 +19,7 @@ export interface SearchHit {
   hits: number;
   /** Best BM25 rank (lower = better). */
   bestRank: number;
-  snippets: { role: string; text: string }[];
+  snippets: { role: string; text: string; entryIndex: number | null }[];
 }
 
 export interface QueryOptions {
@@ -81,18 +81,18 @@ export function search(
   const wanted = new Set(groups.map((g) => g.path));
   const candidates = db
     .prepare(
-      `SELECT rowid AS id, session_path AS path, role
+      `SELECT rowid AS id, session_path AS path, role, entry_index AS entryIndex
        FROM chunks WHERE chunks MATCH ?
        ORDER BY rank
        LIMIT 500`,
     )
-    .all(match) as { id: number; path: string; role: string }[];
-  const snippetRows = new Map<string, { id: number; role: string }[]>();
+    .all(match) as { id: number; path: string; role: string; entryIndex: number | null }[];
+  const snippetRows = new Map<string, { id: number; role: string; entryIndex: number | null }[]>();
   for (const row of candidates) {
     if (!wanted.has(row.path) || row.role === "meta") continue;
     const list = snippetRows.get(row.path) ?? [];
     if (list.length < 3) {
-      list.push({ id: row.id, role: row.role });
+      list.push({ id: row.id, role: row.role, entryIndex: row.entryIndex });
       snippetRows.set(row.path, list);
     }
   }
@@ -103,11 +103,16 @@ export function search(
   for (const group of groups) {
     const session = sessionStmt.get(group.path) as any;
     if (!session) continue;
-    const snippets: { role: string; text: string }[] = [];
+    const snippets: { role: string; text: string; entryIndex: number | null }[] = [];
     for (const row of snippetRows.get(group.path) ?? []) {
       const text = (textStmt.get(row.id) as any)?.text;
       if (typeof text === "string" && text) {
-        snippets.push({ role: row.role, text: makeSnippet(text, tokens) });
+        const entryIndex = Number(row.entryIndex);
+        snippets.push({
+          role: row.role,
+          text: makeSnippet(text, tokens),
+          entryIndex: Number.isFinite(entryIndex) && entryIndex > 0 ? entryIndex : null,
+        });
       }
     }
     results.push({
