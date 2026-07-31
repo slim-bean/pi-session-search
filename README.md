@@ -4,9 +4,13 @@ Centralized full-text search over **all** pi sessions, from any pi session.
 
 pi stores sessions per-project under `~/.pi/agent/sessions/--<escaped-cwd>--/*.jsonl`,
 and the built-in `/resume` only sees the current project. This extension indexes
-every session across every project and exposes a `/session-search` command that can open
-any result in place — pi rebinds cwd, tools, trust, and project config to the
-session's original directory, so it behaves exactly like resuming from that folder.
+every session across every project and exposes:
+
+- `/session-search` — a live search panel that can open any result in place —
+  pi rebinds cwd, tools, trust, and project config to the session's original
+  directory, so it behaves exactly like resuming from that folder.
+- `session_search` — a tool the LLM can call to find past sessions ("what did
+  we decide about X last week?") without opening the panel.
 
 ## Usage
 
@@ -27,6 +31,14 @@ Keys:
 - `Enter` — open the session in the current pi (cross-project resume)
 - `Tab` — copy `cd <dir> && pi --session <file>` to the clipboard for a new terminal
 - `Esc` — cancel
+
+### `session_search` tool
+
+The LLM can search sessions itself: terms are AND'd and stemmed, `"quoted
+phrases"` match exactly, an empty query lists the most recent sessions.
+Results include the project directory, highlighted snippets, and a
+`cd <dir> && pi --session <file>` resume command the model can hand back to
+you. The index is synced incrementally before every call, same as the panel.
 
 ## Install
 
@@ -76,14 +88,15 @@ Then `/reload` (or restart pi). No npm install needed — zero runtime dependenc
 
 ```
 extension/
-  index.ts     extension entry: /session-search command + results picker UI
+  index.ts     extension entry: session_search tool + /session-search command + picker UI
   indexer.ts   SQLite FTS5 schema, session JSONL parsing, incremental sync
   search.ts    MATCH query building + grouped BM25 search
+  format.ts    shared path/date helpers + compact tool output for the LLM
 test/
   smoke.ts     indexes real sessions into a temp DB and runs sample queries
                (node test/smoke.ts [query])
-  panel.ts     unit tests for query building, snippets, results list, and the
-               live panel key handling (node test/panel.ts)
+  panel.ts     unit tests for query building, snippets, tool output formatting,
+               results list, and live panel key handling (node test/panel.ts)
 ```
 
 ## Roadmap

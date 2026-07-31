@@ -1,9 +1,11 @@
 /**
- * Standalone tests for the live search panel and match-query building.
+ * Standalone tests for the live search panel, match-query building, and the
+ * LLM output formatter.
  * Run: node test/panel.ts
- * Requires node_modules/@earendil-works symlinks (see AGENTS.md).
+ * Requires node_modules symlinks (@earendil-works, typebox — see AGENTS.md).
  */
 import assert from "node:assert";
+import { formatHits, resumeCommand } from "../extension/format.ts";
 import { ResultsList, SearchPanel } from "../extension/index.ts";
 import {
   HL_END,
@@ -51,6 +53,30 @@ assert(
   !makeSnippet("assessment of sessions", ["sess"]).includes(`${HL_START}ssment`),
   "mid-word occurrence not anchored",
 );
+
+// --- formatHits (session_search tool output) ---------------------------------
+{
+  const toolHits = makeHits(2);
+  const out = formatHits(toolHits, { query: "match", currentSessionPath: toolHits[1]!.path });
+  assert(out.includes('2 sessions matching "match"'), "match header");
+  assert(out.includes("named session"), "session name shown");
+  assert(out.includes("«match»"), "highlight markers converted");
+  assert(!out.includes(HL_START), "no raw markers");
+  assert(out.includes("(current session)"), "current session marked");
+  assert(out.includes(resumeCommand(toolHits[0]!)), "resume command included");
+  assert(out.includes("3 matching chunks"), "chunk count shown");
+
+  const missing = makeHits(1).map((h) => ({ ...h, cwd: "/nonexistent-pi-session-search" }));
+  assert(formatHits(missing, { query: "x" }).includes("(directory missing)"), "missing dir marked");
+
+  const recent = makeHits(1).map((h) => ({ ...h, hits: 0, snippets: [] }));
+  const recentOut = formatHits(recent, { query: "" });
+  assert(recentOut.includes("1 most recent session"), "recent header");
+  assert(!recentOut.includes("matching chunk"), "no chunk count without query");
+
+  assert(formatHits([], { query: "zzz" }).includes('No sessions match "zzz"'), "empty with query");
+  assert(formatHits([], { query: "" }).includes("No pi sessions found"), "empty without query");
+}
 
 // --- ResultsList -------------------------------------------------------------
 const hits = makeHits(8);

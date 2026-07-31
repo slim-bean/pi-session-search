@@ -1,12 +1,17 @@
 # Agent notes
 
-pi extension providing `/session-search` — global full-text search over all pi sessions.
+pi extension providing `/session-search` (live panel) and the `session_search`
+tool (LLM-callable) — global full-text search over all pi sessions.
 See README.md for usage and architecture.
 
 ## Key facts
 
-- Zero npm dependencies. Uses `node:sqlite` (FTS5) — requires the Node pi runs on
-  to be ≥ 22. TypeScript is loaded by pi via jiti; no build step.
+- Zero npm dependencies at runtime. Uses `node:sqlite` (FTS5) — requires the
+  Node pi runs on to be ≥ 22. TypeScript is loaded by pi via jiti; no build
+  step. `typebox` (tool parameter schema) is injected by pi via loader aliases,
+  like the pi peer deps.
+- The `session_search` tool and the panel share one `SessionIndex` and the same
+  incremental sync; tool output text lives in `extension/format.ts`.
 - Installable as a pi package (`package.json` has the `pi` manifest pointing at
   `./extension/index.ts`; pi deps are `peerDependencies` marked `optional` in
   `peerDependenciesMeta`, per docs/packages.md — pi injects them via loader
@@ -39,8 +44,8 @@ See README.md for usage and architecture.
 
 - `node test/smoke.ts [query]` — indexes real `~/.pi/agent/sessions` into a temp
   DB, checks incremental sync is a no-op, prints top hits. No pi required.
-- `node test/panel.ts` — unit tests: match-query building, JS snippets, results
-  list rendering, live panel keystroke handling. Needs the
-  `node_modules/@earendil-works` symlinks (pi-coding-agent, pi-tui) to resolve
-  pi imports outside pi.
+- `node test/panel.ts` — unit tests: match-query building, JS snippets, tool
+  output formatting, results list rendering, live panel keystroke handling.
+  Needs the `node_modules` symlinks (@earendil-works/pi-coding-agent,
+  @earendil-works/pi-tui, typebox) to resolve pi imports outside pi.
 - Manual: run `pi` anywhere and use `/session-search`.

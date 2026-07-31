@@ -1,6 +1,7 @@
 /**
  * pi-session-search: centralized full-text search over all pi sessions.
  *
+ * `session_search` tool               - lets the LLM search past sessions
  * /session-search [query]            - live search panel over every session
  * /session-search --rebuild [query]  - drop and rebuild the index first
  *
@@ -11,7 +12,6 @@
  */
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import {
@@ -23,6 +23,8 @@ import {
   type Focusable,
   type TUI,
 } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
+import { formatDate, formatHits, prettyPath, resumeCommand } from "./format.ts";
 import { SessionIndex, defaultSessionsRoot } from "./indexer.ts";
 import { HL_END, HL_START, recentSessions, search, type SearchHit } from "./search.ts";
 
@@ -30,28 +32,14 @@ const STATUS_KEY = "session-search";
 const RESULT_LIMIT = 20;
 const MAX_VISIBLE = 5;
 const MIN_QUERY_LENGTH = 2;
+const TOOL_DEFAULT_LIMIT = 10;
+const TOOL_MAX_LIMIT = 50;
 
 type PickAction = { type: "open" | "copy"; hit: SearchHit } | null;
 
 interface MiniTheme {
   fg(color: string, text: string): string;
   bold(text: string): string;
-}
-
-function prettyPath(path: string): string {
-  const home = homedir();
-  return path.startsWith(home) ? `~${path.slice(home.length)}` : path;
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function formatDate(ms: number | null): string {
-  if (!ms) return "";
-  const d = new Date(ms);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 function renderSnippet(snippet: string, theme: MiniTheme): string {
@@ -275,11 +263,67 @@ export default function (pi: ExtensionAPI) {
     index = undefined;
   });
 
+  pi.registerTool({
+    name: "session_search",
+    label: "Session Search",
+    description:
+      "Full-text search over all of the user's past pi sessions across every project. " +
+      "Matches user messages, assistant replies, compaction summaries, session names, and " +
+      "project paths (tool output and thinking are not indexed). Terms are AND'd and " +
+      'porter-stemmed; "quoted phrases" match exactly. An empty query lists the most recent ' +
+      "sessions. Each result includes the project directory, matching snippets, and a " +
+      "`cd <dir> && pi --session <file>` resume command.",
+    promptSnippet:
+      "Search the user's past pi sessions across all projects (full-text over messages and summaries)",
+    promptGuidelines: [
+      "Use session_search when the user refers to a past pi conversation, a decision made in another session, or asks what they worked on before.",
+    ],
+    parameters: Type.Object({
+      query: Type.Optional(
+        Type.String({
+          description:
+            'Search terms (AND\'d, stemmed) and "quoted phrases" (exact). Empty for the most recent sessions.',
+        }),
+      ),
+      limit: Type.Optional(
+        Type.Integer({
+          minimum: 1,
+          maximum: TOOL_MAX_LIMIT,
+          description: `Max sessions to return (default ${TOOL_DEFAULT_LIMIT}).`,
+        }),
+      ),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const idx = getIndex();
+      await idx.sync(defaultSessionsRoot());
+
+      const query = (params.query ?? "").trim();
+      const limit = params.limit ?? TOOL_DEFAULT_LIMIT;
+      const hits = query ? search(idx, query, limit) : recentSessions(idx, limit);
+      const currentSessionPath = ctx.sessionManager.getSessionFile();
+
+      return {
+        content: [{ type: "text", text: formatHits(hits, { query, currentSessionPath }) }],
+        details: {
+          query,
+          hits: hits.map((hit) => ({
+            path: hit.path,
+            cwd: hit.cwd,
+            name: hit.name,
+            date: formatDate(hit.createdAt ?? hit.modifiedAt),
+            messageCount: hit.messageCount,
+            hits: hit.hits,
+          })),
+        },
+      };
+    },
+  });
+
   pi.registerCommand("session-search", {
     description: "Search all pi sessions across every project (--rebuild to reindex)",
     handler: async (args, ctx) => {
       if (ctx.mode !== "tui") {
-        ctx.ui.notify("/session-search requires interactive mode", "error");
+        ctx.ui.notify("/session-search needs interactive mode; use the session_search tool instead", "error");
         return;
       }
 
@@ -331,7 +375,7 @@ export default function (pi: ExtensionAPI) {
       if (!action) return;
 
       if (action.type === "copy") {
-        const command = `cd ${shellQuote(action.hit.cwd)} && pi --session ${shellQuote(action.hit.path)}`;
+        const command = resumeCommand(action.hit);
         if (copyToClipboard(command)) {
           ctx.ui.notify(`Copied: ${command}`, "info");
         } else {
