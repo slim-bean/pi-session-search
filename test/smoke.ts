@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionIndex, defaultSessionsRoot } from "../extension/indexer.ts";
-import { search } from "../extension/search.ts";
+import { search, searchSessions } from "../extension/search.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "session-search-"));
 const dbPath = join(dir, "index.db");
@@ -35,6 +35,20 @@ for (const hit of search(index, query, 5)) {
     console.log(`    ${snippet.role}: ${clean.slice(0, 140)}`);
   }
 }
+
+console.log("\nRetrieval timings (median of 3 runs):");
+for (const term of ["semantic search", "embedding", "se", "th"]) {
+  const elapsed: number[] = [];
+  for (let i = 0; i < 3; i++) {
+    const start = performance.now();
+    search(index, term, 20, { prefix: true });
+    elapsed.push(performance.now() - start);
+  }
+  console.log(`  panel prefix ${JSON.stringify(term)}: ${elapsed.sort((a, b) => a - b)[1]!.toFixed(1)}ms`);
+}
+const scopedStart = performance.now();
+const scoped = searchSessions(index, { project: process.cwd(), anyOf: ["embedding", "reranking", '"semantic search"'], limit: 5 });
+console.log(`  scoped alternatives + count: ${(performance.now() - scopedStart).toFixed(1)}ms (${scoped.total} sessions)`);
 
 index.close();
 rmSync(dir, { recursive: true, force: true });

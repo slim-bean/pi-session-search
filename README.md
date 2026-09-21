@@ -1,138 +1,225 @@
 # pi-session-search
 
-Centralized full-text search over **all** pi sessions, from any pi session.
+Search and read **all your local pi conversations**, across projects. Designed
+for a frontier model to investigate history using scoped keyword searches,
+compact evidence, and optional, inspectable topic summaries—not vectors.
 
-pi stores sessions per-project under `~/.pi/agent/sessions/--<escaped-cwd>--/*.jsonl`,
-and the built-in `/resume` only sees the current project. This extension indexes
-every session across every project and exposes:
-
-- `/session-search` — a live search panel that can open any result in place —
-  pi rebinds cwd, tools, trust, and project config to the session's original
-  directory, so it behaves exactly like resuming from that folder.
-- `session_search` — a tool the LLM can call to find past sessions ("what did
-  we decide about X last week?") without opening the panel.
-- `session_read` — a tool the LLM can call to examine one session found via
-  `session_search`: outline, read entry ranges, or search inside it — without
-  ever pulling a whole (potentially multi-MB) session into context.
-
-## Usage
-
-```
-/session-search [query]             open the live search panel (optionally prefilled)
-/session-search "exact phrase" word quoted phrases + AND'd terms (FTS5 syntax-safe)
-/session-search --rebuild           drop and rebuild the index first
-```
-
-The panel searches on **every keystroke**; words match as prefixes while you
-type (`sess sear` finds "session search"), quoted phrases match exactly. An
-empty query shows the most recent sessions.
-
-Keys:
-
-- type — refine the search
-- `↑`/`↓` (or `Ctrl+P`/`Ctrl+N`) — navigate results
-- `Enter` — open the session in the current pi (cross-project resume)
-- `Tab` — copy `cd <dir> && pi --session <file>` to the clipboard for a new terminal
-- `Esc` — cancel
-
-### `session_search` tool
-
-The LLM can search sessions itself: terms are AND'd and stemmed, `"quoted
-phrases"` match exactly, an empty query lists the most recent sessions.
-Results include the project directory, highlighted snippets labelled with
-entry `#indices`, and a `cd <dir> && pi --session <file>` resume command the
-model can hand back to you. The index is synced incrementally before every
-call, same as the panel.
-
-### `session_read` tool
-
-Sessions can be enormous (multi-MB, thousands of messages), so `session_read`
-exposes one session at three depths instead of dumping it:
-
-1. **Overview** (default) — metadata plus a paginated outline: one line per
-   entry with `#index`, kind (`user`, `assistant`, `tool:bash`, `compaction`,
-   …), size, and a one-line preview.
-2. **Targeted read** — `entries:"40-45,52"` returns the full text of those
-   entries, *including tool calls, tool output, and thinking* (which the
-   search index deliberately excludes), under a `maxChars` budget with
-   continuation hints (`offsetChars` resumes inside a single huge entry).
-3. **In-session search** — `query:"…"` scans the full rendered text of every
-   entry (tool output included) and returns matching `#indices` + snippets.
-
-Entry `#indices` line up with the labels on `session_search` snippets, so the
-typical flow is: `session_search` → `session_read` with `entries` around a
-snippet's `#index`.
+- `/session-search` — instant prefix-search picker; open a session or copy its
+  resume command.
+- `session_search` — lexical search, session browsing, and project discovery.
+- `session_read` — conversation text, context around a hit, full forensic
+  entries, or cached topic summaries.
+- `session_summarize` — explicitly plan/generate cached topic summaries.
+  **Only generation makes additional model calls.**
 
 ## Install
 
-As a pi package (recommended — works for git remotes and local checkouts):
-
 ```bash
-pi install git:github.com/slim-bean/pi-session-search   # from the git remote
-pi install /path/to/pi-session-search                 # from a local checkout
+pi install git:github.com/slim-bean/pi-session-search
+# or, for development:
+pi install /path/to/pi-session-search
 ```
 
-That records the source in `~/.pi/agent/settings.json`; a hand-written entry
-works the same, with paths resolved relative to the settings file:
+Node ≥22.13 with `node:sqlite` is required. No third-party runtime dependencies
+or build step; pi provides its peer packages and loads TypeScript.
+
+A local installation loads files in place. Run `/reload` after edits. Don't
+also symlink the extension into `~/.pi/agent/extensions/`, or it loads twice.
+Local package paths in `~/.pi/agent/settings.json` resolve relative to that file:
 
 ```json
 { "packages": ["../../projects/pi-session-search"] }
 ```
 
-A local path is loaded in place, so edits apply on the next `/reload` — no
-reinstall needed. `pi list` shows what is configured.
+**Upgrading from 0.2:** the index rebuilds automatically on first search.
+`session_read` now defaults to conversation-only text; request `view:"full"`
+for the previous behavior. Reload other running pi sessions using this
+extension too, so they don't access the shared database with the old schema.
 
-Alternatively, symlink the `extension/` directory into pi's global extensions
-dir. Pick one mechanism, not both, or the command loads twice as
-`/session-search:1` and `/session-search:2`:
+## Search and discovery
+
+These examples are tool arguments (ask pi to make the calls):
+
+```js
+// Find the project first, without guessing conversation vocabulary.
+session_search({ group: "projects", limit: 20 })
+
+// Alternative terminology, restricted independently to this project's sessions.
+session_search({
+  project: "current",
+  anyOf: ['"semantic search"', "embedding", "reranking"],
+  limit: 5
+})
+
+// What the user said during a particular period—not when the session began.
+session_search({
+  query: "index",
+  roles: ["user"],
+  since: "2026-07-01", until: "2026-07-31", dateField: "message"
+})
+
+// Browse session metadata and available summary previews.
+session_search({ project: "/path/to/project", snippets: 0, offset: 10 })
+```
+
+### Search contract
+
+- `query` terms are AND'd **within one entry**. `match:"any"` ORs those terms.
+- `anyOf` ORs alternative queries, each internally AND'd. When both are
+  present, `query AND (alternative1 OR alternative2 …)` must match one entry.
+- Quotes require adjacent tokens, **not byte-exact text**: FTS5's Porter
+  stemming still applies. For example, “embedding” can also match “embedded”.
+  Operators typed into the query are literal words; use the structured fields.
+- `project` is an **exact working-directory filter**, not “discusses this
+  project”. It accepts `current`, an absolute path, `~/`, or a relative path.
+  `projectScope:"tree"` includes child directories, not similarly named siblings.
+  Omit it to search discussions that happened elsewhere.
+- `excludeCurrent` defaults to `true` to avoid rediscovering the question just
+  asked. The interactive picker still includes the current session.
+- `since`/`until` accept UTC dates, ISO timestamps with a timezone,
+  `today`/`yesterday`, or relative durations such as `7d`, `2w`, `24h`.
+  Bounds are inclusive; an `until` date includes its entire UTC day.
+- `dateField` defaults to `activity` (last user/assistant text timestamp).
+  `created` uses the session header; `message` filters matching entry
+  timestamps and excludes metadata/generated summaries. None uses filesystem
+  modification time. Activity includes all stored branches.
+- `roles` can restrict `user`, `assistant`, `summary` (pi compaction/branch),
+  `custom`, `meta` (name/path), or `generated` (cached topic summaries).
+- `sort` is `relevance`, `recent`, or `oldest` (the latter two use activity).
+  Default: relevance with a query, recent without one. `group:"projects"`
+  always sorts by matching session count.
+- `limit` (default 10, max 50), `offset`, `snippets` (default 3, max 5), and
+  `maxChars` bound output. The response reports the **total** and an actionable
+  next offset, including when the output budget shortened the page. The live
+  index can change between calls; pagination isn't a frozen snapshot.
+- `includeResume:true` adds shell commands; otherwise paths and source entry
+  references are returned without that extra overhead.
+
+Results distinguish generated summaries and metadata-only matches. Excerpts
+prefer windows covering several query terms; highlighting is approximate,
+while matching is performed by FTS5. **No keyword matches is not proof a topic
+was never discussed.** Try alternatives, broaden scope, or browse summaries.
+
+## Read the evidence
+
+```js
+session_read({ path: "...jsonl", around: 42, context: 2 })
+session_read({ path: "...jsonl", entries: "40-45,52", roles: ["user"] })
+session_read({ path: "...jsonl", query: "embeddings", match: "any" })
+session_read({ path: "...jsonl", entries: "42", view: "full" })
+session_read({ path: "...jsonl", view: "summary" })
+```
+
+- **Default `view:"conversation"`:** only user/assistant text blocks. No
+  thinking, tool calls/results, images, extension messages, or compactions.
+- **`view:"full"`:** includes all entries, thinking, tool arguments and results.
+  Images are represented by placeholders, not decoded/OCR'd.
+- **`view:"summary"`:** cached, generated topic outline, without generation.
+  Missing/partial/stale status is explicit; stale references aren't presented
+  as current evidence.
+- No selection returns an outline. `entries` reads original ordinals;
+  `around` adds `context` visible messages **on each side** (default 2), not
+  raw entries or user/assistant pairs. `entries`, `around`, and `query` are
+  mutually exclusive.
+- Filtered views **never renumber** `#indices`. `offset` counts visible outline
+  entries, matches, or summary overview/topic items—not original ordinals.
+- In-session `query` is case-insensitive **substring** matching, without
+  stemming. `match` is `all` (default) or `any`; quotes group phrases.
+- Reads include timestamps and entry/parent IDs. All branches are retained in
+  file order; adjacent entries are not necessarily on the same branch.
+- `maxChars` defaults to 20,000 (max 40,000), with additional UTF-8 byte/line output
+  ceilings. A partial entry returns `offsetChars` and separate instructions for
+  subsequent entries. Continue with the same view/roles.
+
+## Optional summary indexing
+
+```js
+// Free/local planning: chooses the active model unless one is specified.
+session_summarize({ path: "...jsonl", action: "plan" })
+
+// Explicit paid work: use the model reported by the plan.
+session_summarize({
+  path: "...jsonl", action: "generate",
+  model: "provider/model-id", maxSections: 4
+})
+```
+
+Generation sends historical **user/assistant text** to the selected provider
+using pi's model registry and existing authentication. It does not change the
+active model. Check the plan/provider before generating sensitive history.
+Normal searches and reads never generate summaries automatically.
+
+- One session per call; discover a batch with `session_search`, then plan or
+  generate each explicitly. Default work cap: 4 new calls; maximum: 20.
+- Whole messages are packed into bounded sections (at most 24,000 serialized
+  input characters; smaller for limited-context models). Oversized messages
+  are split with exact source offsets. **No sampling.**
+- Each section produces an overview and topic records: intent, proposals,
+  decisions/outcomes, open questions, keywords/aliases, and source indices.
+  The prompt requests attribution and cautions about branches/incomplete context.
+- JSON shape, size, and source references are validated. This is **not factual
+  validation**: generated summaries are navigation aids, never authoritative
+  evidence of what was decided or implemented.
+- Successful sections persist immediately. Repeat a call with the same
+  path/model to resume after a work cap, cancellation, or failure. Unchanged
+  sections are reused after appends. Model/version changes use separate cache keys.
+- Only a **complete, fresh generation** is published to FTS5. Edits mark old
+  summaries stale and remove them from search on sync. A source change during
+  generation prevents publication. Cached sections remain reusable.
+- Provider calls are abortable and have a two-minute deadline each. Reported
+  nested usage is returned to pi, including usage from completed requests
+  before a later validation/failure/cancellation.
+- No daemon, embeddings, automatic reranker, or session-file mutation.
+
+## Interactive picker
+
+```text
+/session-search [query]
+/session-search "phrase" word
+/session-search --rebuild
+```
+
+Searches on every keystroke, with prefix matching for unquoted terms.
+`↑`/`↓` or `Ctrl+P`/`Ctrl+N` navigate; `Enter` opens; `Tab` copies the resume
+command; `Esc` cancels. Opening across projects uses pi's session switching,
+which rebinds cwd/tools/trust. The richer filters above belong to the LLM tool.
+
+## Storage and development
+
+Sessions: `~/.pi/agent/sessions/<project>/*.jsonl`. Database:
+`~/.pi/agent/session-search/index.db`. `PI_CODING_AGENT_DIR` relocates both.
+The database contains private conversation text and derived summaries; treat
+it like your session files. Deleting it is safe but discards paid-for summaries.
+`--rebuild` preserves summary caches and reattaches fresh summaries.
+
+SQLite FTS5 supplies the inverted keyword index, Porter stemming, BM25
+ranking, and prefix indexes. Files sync by mtime + size. Unreadable/malformed
+files are reported rather than silently discarded; unavailable session roots
+fail without deleting the existing index. **All** indexed text
+is retained (the old 16,000-character cutoff is gone); tools/thinking are
+excluded. Index and reader share JSONL parsing/ordinals. No build step.
+
+```text
+extension/
+  index.ts          registration/lifecycle and /session-search
+  tools.ts          three LLM-facing tool schemas/handlers
+  panel.ts          live picker components
+  session-file.ts   shared parser, text extraction, fingerprints
+  indexer.ts        incremental FTS5 storage/sync
+  search.ts         lexical queries, filters, grouping, snippets
+  reader.ts         full source rendering and filtered projections
+  summary-store.ts  versioned cache, freshness, publication
+  summarizer.ts     bounded/resumable generation, validation
+  format.ts         bounded LLM-facing output
+```
 
 ```bash
-ln -sfn "$(pwd)/extension" ~/.pi/agent/extensions/session-search
+npm test                         # synthetic fixtures + fake provider; no API calls
+node test/smoke.ts [query]        # throwaway DB over real history + timing probes
 ```
 
-Then `/reload` (or restart pi). No npm install needed — zero runtime dependencies.
-
-## How it works
-
-- **Index**: SQLite with FTS5 (built into `node:sqlite`, Node ≥ 22) at
-  `~/.pi/agent/session-search/index.db`.
-- **What's indexed**: user messages, assistant text, extension messages,
-  compaction/branch summaries, session names, and the session's folder path.
-  Tool output and thinking blocks are excluded to keep the index small.
-- **Incremental sync**: on each `/session-search`, files are compared by mtime + size and
-  only changed sessions are re-parsed. Full build of ~270 sessions (~200MB) takes
-  ~2s; subsequent syncs are milliseconds.
-- **Ranking**: BM25 per chunk, grouped by session (best chunk wins), with
-  highlighted snippets built in JS around the first match.
-- **Entry ordinals**: the index stores each chunk's entry ordinal
-  (`chunks.entry_index`), counted identically by the indexer and the reader,
-  so search snippets and `session_read` share one `#index` numbering.
-- **Live typing**: FTS5 prefix indexes (`prefix='2 3 4'`) keep worst-case
-  keystroke latency around ~60ms even for very common short tokens.
-
-## Layout
-
-```
-extension/
-  index.ts     extension entry: session_search + session_read tools,
-               /session-search command + picker UI
-  indexer.ts   SQLite FTS5 schema, session JSONL parsing, incremental sync
-  search.ts    MATCH query building + grouped BM25 search
-  reader.ts    full session parsing for session_read (tool calls/output,
-               thinking); entry ordinals aligned with the index
-  format.ts    shared helpers + compact tool output for the LLM
-test/
-  smoke.ts     indexes real sessions into a temp DB and runs sample queries
-               (node test/smoke.ts [query])
-  panel.ts     unit tests for query building, snippets, tool output formatting,
-               results list, and live panel key handling (node test/panel.ts)
-  reader.ts    unit tests for the session reader, entry ranges, budgets, and
-               indexer/reader ordinal alignment (node test/reader.ts)
-```
-
-## Roadmap
-
-- **Phase 2 — LLM re-ranking**: for fuzzy queries ("that session where I debugged
-  the flaky CI thing"), feed the top ~30 FTS candidates as compact digests to a
-  fast model via pi's model registry, re-rank, and annotate why each matches.
-- Possible later: embeddings, date/project filters (`in:daas`, `after:2026-06`).
+Standalone tests need Node's strip-types support (Node ≥22.18, or the
+appropriate experimental flag on older Node) and local `node_modules`
+resolution for the optional pi peers. pi itself supplies these via aliases.
+See [test/EVALUATION.md](test/EVALUATION.md) for testing retrieval quality,
+not just implementation correctness.

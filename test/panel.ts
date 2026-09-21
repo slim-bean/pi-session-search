@@ -44,7 +44,7 @@ assert.equal(buildMatchQuery('"exact" par', { prefix: true }), '"exact" "par"*',
 // --- extractTokens / makeSnippet ---------------------------------------------
 assert.deepEqual(extractTokens('"a phrase" word'), ["a phrase", "word"]);
 
-const snip = makeSnippet("x ".repeat(200) + "the session indexer works", ["sess"]);
+const snip = makeSnippet("x ".repeat(200) + "the session indexer works", ["sess"], 160);
 assert(snip.includes(`${HL_START}session${HL_END}`), "prefix highlight");
 assert(snip.startsWith("…"), "leading ellipsis when windowed");
 assert(!snip.includes("x x x x x x x x x x x x x x x x x x x x x x x x x x x"), "windowed");
@@ -58,25 +58,26 @@ assert(
 {
   const toolHits = makeHits(2);
   const out = formatHits(toolHits, { query: "match", currentSessionPath: toolHits[1]!.path });
-  assert(out.includes('2 sessions matching "match"'), "match header");
+  assert(out.includes("Showing 1–2 of 2"), "counted match header");
   assert(out.includes("named session"), "session name shown");
   assert(out.includes("«match»"), "highlight markers converted");
   assert(!out.includes(HL_START), "no raw markers");
   assert(out.includes("[user #40]"), "snippet labelled with entry index");
   assert(out.includes("session_read"), "footer points at session_read");
   assert(out.includes("(current session)"), "current session marked");
-  assert(out.includes(resumeCommand(toolHits[0]!)), "resume command included");
-  assert(out.includes("3 matching chunks"), "chunk count shown");
+  assert(!out.includes(resumeCommand(toolHits[0]!)), "resume commands omitted by default");
+  assert(formatHits(toolHits, { query: "match", includeResume: true }).includes(resumeCommand(toolHits[0]!)), "resume commands opt-in");
+  assert(out.includes("3 matching entries"), "entry count shown");
 
   const missing = makeHits(1).map((h) => ({ ...h, cwd: "/nonexistent-pi-session-search" }));
   assert(formatHits(missing, { query: "x" }).includes("(directory missing)"), "missing dir marked");
 
   const recent = makeHits(1).map((h) => ({ ...h, hits: 0, snippets: [] }));
   const recentOut = formatHits(recent, { query: "" });
-  assert(recentOut.includes("1 most recent session"), "recent header");
+  assert(recentOut.includes("Session listing (recent)"), "recent header");
   assert(!recentOut.includes("matching chunk"), "no chunk count without query");
 
-  assert(formatHits([], { query: "zzz" }).includes('No sessions match "zzz"'), "empty with query");
+  assert(formatHits([], { query: "zzz" }).includes("No keyword matches"), "empty with query");
   assert(formatHits([], { query: "" }).includes("No pi sessions found"), "empty without query");
 }
 

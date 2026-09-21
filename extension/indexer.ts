@@ -1,320 +1,222 @@
-/**
- * SQLite FTS5 index over all pi sessions.
- *
- * Zero dependencies: uses node:sqlite (Node >= 22 with FTS5 built in).
- * Index lives at ~/.pi/agent/session-search/index.db and is synced
- * incrementally by comparing file mtime + size against the index.
- */
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
+/** Incremental SQLite FTS5 index. Source text is never truncated. */
+import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { conversationEntry, fingerprint, readSessionSource, textFromContent, timestamp, type ConversationEntry } from "./session-file.ts";
+import { ensureSummarySchema, publishSummaryChunks, SUMMARY_VERSION } from "./summary-store.ts";
 
-const SCHEMA_VERSION = "3";
-const MAX_CHUNK_CHARS = 16_000;
-
-export interface SyncProgress {
-  scanned: number;
-  total: number;
-  indexed: number;
-}
-
-export interface SyncResult {
-  totalFiles: number;
-  indexed: number;
-  removed: number;
-}
-
+const SCHEMA_VERSION = "4";
+export interface SyncProgress { total: number; scanned: number; indexed: number }
+export interface SyncResult { totalFiles: number; indexed: number; removed: number; skipped: number }
 interface Chunk {
   entryId: string;
-  /** 1-based ordinal of the entry in file order — matches reader.ts numbering. */
   entryIndex: number;
   role: string;
+  timestampMs: number | null;
   text: string;
 }
-
-interface ParsedSession {
+export interface ParsedSession {
   cwd: string;
   name: string | null;
   firstMessage: string | null;
   createdAt: number | null;
+  activityAt: number | null;
   messageCount: number;
+  conversationHash: string;
   chunks: Chunk[];
 }
 
 export function defaultSessionsRoot(): string {
-  return join(homedir(), ".pi", "agent", "sessions");
+  return join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "sessions");
 }
-
 export function defaultDbPath(): string {
-  return join(homedir(), ".pi", "agent", "session-search", "index.db");
-}
-
-function textFromContent(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .filter((b: any) => b && b.type === "text" && typeof b.text === "string")
-      .map((b: any) => b.text)
-      .join("\n");
-  }
-  return "";
-}
-
-function clip(text: string): string {
-  return text.length > MAX_CHUNK_CHARS ? text.slice(0, MAX_CHUNK_CHARS) : text;
+  return join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "session-search", "index.db");
 }
 
 export function parseSessionFile(path: string): ParsedSession | null {
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf8");
-  } catch {
-    return null;
-  }
-
-  const lines = raw.split("\n");
-  let header: any;
-  let headerIdx = -1;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!.trim();
-    if (!line) continue;
-    try {
-      header = JSON.parse(line);
-    } catch {
-      return null;
-    }
-    headerIdx = i;
-    break;
-  }
-  if (!header || header.type !== "session") return null;
-
+  let source: ReturnType<typeof readSessionSource>;
+  try { source = readSessionSource(path); } catch { return null; }
+  const { header, entries } = source;
   const parsed: ParsedSession = {
-    cwd: typeof header.cwd === "string" ? header.cwd : "",
-    name: null,
-    firstMessage: null,
-    createdAt: header.timestamp ? Date.parse(header.timestamp) || null : null,
-    messageCount: 0,
-    chunks: [],
+    cwd: typeof header.cwd === "string" ? header.cwd : "", name: null, firstMessage: null,
+    createdAt: timestamp(header.timestamp), activityAt: null, messageCount: 0, conversationHash: "", chunks: [],
   };
-
-  // Entry ordinal: every successfully parsed entry line after the header
-  // counts, regardless of type. reader.ts counts identically so that
-  // chunks.entry_index lines up with session_read's #indices.
-  let ordinal = 0;
-  for (let i = headerIdx + 1; i < lines.length; i++) {
-    const line = lines[i]!.trim();
-    if (!line) continue;
-    let entry: any;
-    try {
-      entry = JSON.parse(line);
-    } catch {
-      continue; // skip corrupt lines
-    }
-    ordinal++;
-
+  const conversation: ConversationEntry[] = [];
+  for (const { index, value: entry } of entries) {
     const id = typeof entry.id === "string" ? entry.id : "";
+    const when = timestamp(entry.timestamp) ?? timestamp(entry.message?.timestamp);
+    const message = conversationEntry(entry, index);
+    if (message) {
+      conversation.push(message);
+      if (message.timestampMs !== null) parsed.activityAt = Math.max(parsed.activityAt ?? -Infinity, message.timestampMs);
+    }
+    let role: string | undefined;
+    let text = "";
     switch (entry.type) {
       case "message": {
-        const msg = entry.message;
-        if (!msg) break;
+        if (!entry.message) break;
         parsed.messageCount++;
-        if (msg.role === "user") {
-          const text = textFromContent(msg.content).trim();
-          if (text) {
-            if (!parsed.firstMessage) parsed.firstMessage = text.slice(0, 300);
-            parsed.chunks.push({ entryId: id, entryIndex: ordinal, role: "user", text: clip(text) });
-          }
-        } else if (msg.role === "assistant") {
-          const text = textFromContent(msg.content).trim(); // text blocks only (skips thinking/toolCall)
-          if (text) parsed.chunks.push({ entryId: id, entryIndex: ordinal, role: "assistant", text: clip(text) });
+        if (message) {
+          role = message.role;
+          text = message.text;
+          if (role === "user" && !parsed.firstMessage) parsed.firstMessage = text.slice(0, 300);
         }
         break;
       }
-      case "custom_message": {
-        const text = textFromContent(entry.content).trim();
-        if (text) parsed.chunks.push({ entryId: id, entryIndex: ordinal, role: "custom", text: clip(text) });
-        break;
-      }
+      case "custom_message": role = "custom"; text = textFromContent(entry.content).trim(); break;
       case "compaction":
-      case "branch_summary": {
-        const text = typeof entry.summary === "string" ? entry.summary.trim() : "";
-        if (text) parsed.chunks.push({ entryId: id, entryIndex: ordinal, role: "summary", text: clip(text) });
-        break;
-      }
-      case "session_info": {
-        parsed.name = typeof entry.name === "string" && entry.name ? entry.name : null;
-        break;
-      }
+      case "branch_summary": role = "summary"; text = typeof entry.summary === "string" ? entry.summary.trim() : ""; break;
+      case "session_info": parsed.name = typeof entry.name === "string" && entry.name ? entry.name : null; break;
     }
+    if (role && text) parsed.chunks.push({ entryId: id, entryIndex: index, role, text, timestampMs: when });
   }
-
+  parsed.activityAt ??= parsed.createdAt;
+  parsed.conversationHash = fingerprint(conversation);
   return parsed;
 }
 
 export class SessionIndex {
   readonly db: DatabaseSync;
+  private syncing: Promise<SyncResult> | undefined;
 
-  constructor(dbPath: string = defaultDbPath()) {
+  constructor(dbPath = defaultDbPath()) {
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
-    this.db.exec("PRAGMA journal_mode=WAL");
+    this.db.exec("PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;");
     this.ensureSchema();
   }
-
-  close(): void {
-    try {
-      this.db.close();
-    } catch {
-      // already closed
-    }
+  close(): void { this.db.close(); }
+  /** Shutdown may race a yielding sync. Let it finish before closing SQLite. */
+  async dispose(): Promise<void> {
+    try { await this.syncing; } finally { this.close(); }
   }
 
   private ensureSchema(): void {
-    this.db.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)`);
-    const row = this.db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as
-      | { value: string }
-      | undefined;
-    if (row && row.value !== SCHEMA_VERSION) {
-      this.db.exec(`DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS chunks;`);
-    }
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS sessions (
-        path TEXT PRIMARY KEY,
-        cwd TEXT NOT NULL,
-        name TEXT,
-        first_message TEXT,
-        created_at INTEGER,
-        modified_at INTEGER NOT NULL,
-        size INTEGER NOT NULL,
-        message_count INTEGER NOT NULL
-      );
-      CREATE VIRTUAL TABLE IF NOT EXISTS chunks USING fts5(
-        text,
-        session_path UNINDEXED,
-        entry_id UNINDEXED,
-        entry_index UNINDEXED,
-        role UNINDEXED,
-        tokenize = 'porter unicode61',
-        prefix = '2 3 4'
-      );
-    `);
-    this.db
-      .prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)`)
-      .run(SCHEMA_VERSION);
+    const db = this.db;
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)`);
+      const version = db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as any;
+      if (version && version.value !== SCHEMA_VERSION) db.exec(`DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS chunks;`);
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sessions (
+          path TEXT PRIMARY KEY, cwd TEXT NOT NULL, name TEXT, first_message TEXT,
+          created_at INTEGER, activity_at INTEGER, modified_at INTEGER NOT NULL,
+          size INTEGER NOT NULL, message_count INTEGER NOT NULL, conversation_hash TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS sessions_cwd ON sessions(cwd);
+        CREATE INDEX IF NOT EXISTS sessions_activity ON sessions(activity_at);
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunks USING fts5(
+          text, session_path UNINDEXED, entry_id UNINDEXED, entry_index UNINDEXED,
+          role UNINDEXED, timestamp_ms UNINDEXED, source_refs UNINDEXED,
+          tokenize = 'porter unicode61', prefix = '2 3 4'
+        );
+      `);
+      // Summary caches survive FTS schema rebuilds; freshness is checked before reuse.
+      ensureSummarySchema(db);
+      db.prepare(`INSERT OR REPLACE INTO meta VALUES ('schema_version', ?)`).run(SCHEMA_VERSION);
+      db.exec("COMMIT");
+    } catch (error) { db.exec("ROLLBACK"); throw error; }
   }
 
-  /** Drop all indexed data (schema stays). Next sync() rebuilds from scratch. */
+  /** Rebuild lexical data, preserving paid-for summaries and their provenance. */
   reset(): void {
-    this.db.exec(`DELETE FROM sessions; DELETE FROM chunks;`);
+    this.db.exec("BEGIN IMMEDIATE");
+    try { this.db.exec("DELETE FROM sessions; DELETE FROM chunks; COMMIT;"); }
+    catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
-  /**
-   * Incrementally sync the index with session files on disk.
-   * Yields to the event loop periodically so the TUI can repaint.
-   */
-  async sync(
-    sessionsRoot: string = defaultSessionsRoot(),
-    onProgress?: (progress: SyncProgress) => void,
-  ): Promise<SyncResult> {
-    const files = this.scanFiles(sessionsRoot);
+  /** Share concurrent tool syncs rather than overlapping scans/writes. */
+  sync(root: string, onProgress?: (progress: SyncProgress) => void): Promise<SyncResult> {
+    if (this.syncing) return this.syncing;
+    this.syncing = this.syncFiles(root, onProgress).finally(() => { this.syncing = undefined; });
+    return this.syncing;
+  }
 
-    const known = new Map<string, { modified_at: number; size: number }>();
-    for (const row of this.db.prepare(`SELECT path, modified_at, size FROM sessions`).all() as any[]) {
-      known.set(row.path, { modified_at: row.modified_at, size: row.size });
+  private async syncFiles(root: string, onProgress?: (progress: SyncProgress) => void): Promise<SyncResult> {
+    // A temporarily unavailable root must not delete the entire existing index/cache.
+    if (!existsSync(root)) {
+      if (this.db.prepare("SELECT 1 FROM sessions LIMIT 1").get()) throw new Error(`Session directory unavailable: ${root}. Existing index retained, but freshness cannot be checked.`);
+      return { totalFiles: 0, indexed: 0, removed: 0, skipped: 0 };
     }
-
-    const toIndex = files.filter((f) => {
-      const k = known.get(f.path);
-      return !k || k.modified_at !== f.mtimeMs || k.size !== f.size;
+    const files = this.scanFiles(root);
+    const known = new Map<string, { modified_at: number; size: number }>();
+    for (const row of this.db.prepare(`SELECT path, modified_at, size FROM sessions`).all() as any[]) known.set(row.path, row);
+    const changed = files.filter((file) => {
+      const old = known.get(file.path);
+      return !old || old.modified_at !== file.mtimeMs || old.size !== file.size;
     });
     const onDisk = new Set(files.map((f) => f.path));
-    const toRemove = [...known.keys()].filter((p) => !onDisk.has(p));
-
+    const removed = [...known.keys()].filter((path) => !onDisk.has(path));
     let indexed = 0;
-    for (const file of toIndex) {
+    let skipped = 0;
+    for (const [i, file] of changed.entries()) {
       const parsed = parseSessionFile(file.path);
-      if (parsed) {
-        this.upsert(file.path, file.mtimeMs, file.size, parsed);
-        indexed++;
-      } else {
-        this.remove(file.path);
-      }
-      if (indexed % 5 === 0) {
-        onProgress?.({ scanned: indexed, total: toIndex.length, indexed });
+      if (parsed) { this.upsert(file.path, file.mtimeMs, file.size, parsed); indexed++; }
+      else skipped++;
+      // A partially written/corrupt file isn't evidence of deletion. Retry on next sync.
+      if (i % 5 === 0) {
+        onProgress?.({ scanned: i + 1, total: changed.length, indexed });
         await new Promise((resolve) => setImmediate(resolve));
       }
     }
-
-    for (const path of toRemove) this.remove(path);
-
-    onProgress?.({ scanned: toIndex.length, total: toIndex.length, indexed });
-    return { totalFiles: files.length, indexed, removed: toRemove.length };
+    for (const path of removed) this.remove(path);
+    // A prompt/version change also invalidates generated FTS rows, even when
+    // source files haven't changed and therefore aren't reparsed this sync.
+    for (const row of this.db.prepare(`SELECT m.session_path FROM summaries m JOIN sessions s ON s.path = m.session_path
+      WHERE m.version != ? OR m.source_hash != s.conversation_hash`).all(SUMMARY_VERSION) as any[]) {
+      this.db.prepare(`DELETE FROM chunks WHERE session_path = ? AND role = 'generated'`).run(row.session_path);
+    }
+    // Caches retained by reset() also need cleanup for deleted sessions.
+    for (const row of this.db.prepare(`SELECT session_path FROM summaries UNION SELECT session_path FROM summary_cache`).all() as any[]) {
+      if (!onDisk.has(row.session_path)) this.remove(row.session_path);
+    }
+    onProgress?.({ scanned: changed.length, total: changed.length, indexed });
+    return { totalFiles: files.length, indexed, removed: removed.length, skipped };
   }
 
-  private scanFiles(sessionsRoot: string): { path: string; mtimeMs: number; size: number }[] {
+  private scanFiles(root: string): { path: string; mtimeMs: number; size: number }[] {
     const files: { path: string; mtimeMs: number; size: number }[] = [];
-    if (!existsSync(sessionsRoot)) return files;
-    for (const dirEntry of readdirSync(sessionsRoot, { withFileTypes: true })) {
-      if (!dirEntry.isDirectory()) continue;
-      const dir = join(sessionsRoot, dirEntry.name);
-      let names: string[];
-      try {
-        names = readdirSync(dir);
-      } catch {
-        continue;
-      }
-      for (const name of names) {
+    for (const dir of readdirSync(root, { withFileTypes: true })) {
+      if (!dir.isDirectory()) continue;
+      const folder = join(root, dir.name);
+      for (const name of readdirSync(folder)) {
         if (!name.endsWith(".jsonl")) continue;
-        const path = join(dir, name);
+        const path = join(folder, name);
         try {
-          const st = statSync(path);
-          if (st.isFile()) files.push({ path, mtimeMs: Math.round(st.mtimeMs), size: st.size });
-        } catch {
-          // race: file deleted mid-scan
-        }
+          const stat = statSync(path);
+          if (stat.isFile()) files.push({ path, mtimeMs: stat.mtimeMs, size: stat.size });
+        } catch (error: any) { if (error.code !== "ENOENT") throw error; }
       }
     }
     return files;
   }
 
-  private upsert(path: string, mtimeMs: number, size: number, parsed: ParsedSession): void {
-    this.db.exec("BEGIN");
+  private upsert(path: string, mtime: number, size: number, parsed: ParsedSession): void {
+    const db = this.db;
+    db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.prepare(`DELETE FROM chunks WHERE session_path = ?`).run(path);
-      this.db
-        .prepare(
-          `INSERT OR REPLACE INTO sessions
-           (path, cwd, name, first_message, created_at, modified_at, size, message_count)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          path,
-          parsed.cwd,
-          parsed.name,
-          parsed.firstMessage,
-          parsed.createdAt,
-          mtimeMs,
-          size,
-          parsed.messageCount,
-        );
-      const insert = this.db.prepare(
-        `INSERT INTO chunks (text, session_path, entry_id, entry_index, role) VALUES (?, ?, ?, ?, ?)`,
-      );
-      // Meta chunk so folder names and session names are searchable.
-      insert.run([parsed.name, parsed.cwd, basename(path)].filter(Boolean).join(" "), path, "", 0, "meta");
-      for (const chunk of parsed.chunks) {
-        insert.run(chunk.text, path, chunk.entryId, chunk.entryIndex, chunk.role);
-      }
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+      db.prepare(`DELETE FROM chunks WHERE session_path = ?`).run(path);
+      db.prepare(`INSERT OR REPLACE INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(path, parsed.cwd, parsed.name, parsed.firstMessage, parsed.createdAt, parsed.activityAt,
+          mtime, size, parsed.messageCount, parsed.conversationHash);
+      const insert = db.prepare(`INSERT INTO chunks
+        (text, session_path, entry_id, entry_index, role, timestamp_ms, source_refs) VALUES (?, ?, ?, ?, ?, ?, NULL)`);
+      insert.run([parsed.name, parsed.cwd, basename(path)].filter(Boolean).join(" "), path, "", 0, "meta", null);
+      for (const chunk of parsed.chunks) insert.run(chunk.text, path, chunk.entryId, chunk.entryIndex, chunk.role, chunk.timestampMs);
+      publishSummaryChunks(db, path, parsed.conversationHash);
+      db.exec("COMMIT");
+    } catch (error) { db.exec("ROLLBACK"); throw error; }
   }
 
   private remove(path: string): void {
-    this.db.prepare(`DELETE FROM chunks WHERE session_path = ?`).run(path);
-    this.db.prepare(`DELETE FROM sessions WHERE path = ?`).run(path);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const [table, column] of [["chunks", "session_path"], ["sessions", "path"], ["summaries", "session_path"], ["summary_cache", "session_path"]]) {
+        this.db.prepare(`DELETE FROM ${table} WHERE ${column} = ?`).run(path);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 }

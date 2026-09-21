@@ -11,9 +11,9 @@
  *
  * Session file format: see pi docs docs/session-format.md.
  */
-import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { conversationEntry, readSessionSource, timestamp, type ConversationEntry } from "./session-file.ts";
 
 const PREVIEW_CHARS = 110;
 
@@ -21,6 +21,9 @@ export interface ReadEntry {
   /** 1-based ordinal in file order (matches chunks.entry_index). */
   index: number;
   id: string;
+  parentId: string | null;
+  /** User/assistant text blocks only; no thinking, tools, or image payloads. */
+  conversationText: string;
   /** Compact kind label: user, assistant, tool:bash, shell, compaction, ... */
   kind: string;
   timestampMs: number | null;
@@ -46,7 +49,7 @@ export interface LoadedSession {
 export function resolveSessionPath(input: string, cwd: string): string {
   let path = input.trim().replace(/^@/, "");
   if (path === "~" || path.startsWith("~/")) path = join(homedir(), path.slice(1));
-  return isAbsolute(path) ? path : resolve(cwd, path);
+  return resolve(cwd, path);
 }
 
 function contentToText(content: unknown): string {
@@ -86,7 +89,10 @@ function renderMessage(msg: any): Rendered {
       const parts: string[] = [];
       const textParts: string[] = [];
       const toolNames: string[] = [];
-      if (Array.isArray(msg.content)) {
+      if (typeof msg.content === "string") {
+        parts.push(msg.content);
+        textParts.push(msg.content);
+      } else if (Array.isArray(msg.content)) {
         for (const block of msg.content) {
           if (!block) continue;
           if (block.type === "thinking" && block.thinking) {
@@ -165,60 +171,32 @@ function renderEntry(entry: any): Rendered {
 
 /** Parse a session file into fully rendered entries. Throws on bad files. */
 export function loadSessionFile(path: string): LoadedSession {
-  if (!existsSync(path)) throw new Error(`Session file not found: ${path}`);
-  const fileSize = statSync(path).size;
-  const lines = readFileSync(path, "utf8").split("\n");
-
-  let header: any;
-  let headerIdx = -1;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!.trim();
-    if (!line) continue;
-    try {
-      header = JSON.parse(line);
-    } catch {
-      throw new Error(`Not a pi session file (unparseable first line): ${path}`);
-    }
-    headerIdx = i;
-    break;
-  }
-  if (!header || header.type !== "session") {
-    throw new Error(`Not a pi session file (missing session header): ${path}`);
-  }
+  const { header, entries, fileSize } = readSessionSource(path);
 
   const session: LoadedSession = {
     path,
     cwd: typeof header.cwd === "string" ? header.cwd : "",
-    createdAt: header.timestamp ? Date.parse(header.timestamp) || null : null,
+    createdAt: timestamp(header.timestamp),
     name: null,
     fileSize,
     messageCount: 0,
     entries: [],
   };
 
-  let ordinal = 0;
-  for (let i = headerIdx + 1; i < lines.length; i++) {
-    const line = lines[i]!.trim();
-    if (!line) continue;
-    let entry: any;
-    try {
-      entry = JSON.parse(line);
-    } catch {
-      continue; // skip corrupt lines (indexer does the same, keeping ordinals aligned)
-    }
-    ordinal++;
-
+  for (const { index, value: entry } of entries) {
     if (entry.type === "message" && entry.message) session.messageCount++;
     if (entry.type === "session_info") {
-      session.name = typeof entry.name === "string" && entry.name ? entry.name : session.name;
+      session.name = typeof entry.name === "string" && entry.name ? entry.name : null;
     }
 
     const rendered = renderEntry(entry);
     session.entries.push({
-      index: ordinal,
+      index,
       id: typeof entry.id === "string" ? entry.id : "",
+      parentId: typeof entry.parentId === "string" ? entry.parentId : null,
+      conversationText: conversationEntry(entry, index)?.text ?? "",
       kind: rendered.kind,
-      timestampMs: entry.timestamp ? Date.parse(entry.timestamp) || null : null,
+      timestampMs: timestamp(entry.timestamp) ?? timestamp(entry.message?.timestamp),
       text: rendered.text,
       preview: makePreview(rendered.previewSource || rendered.text),
       toolNames: rendered.toolNames ?? [],
@@ -226,6 +204,37 @@ export function loadSessionFile(path: string): LoadedSession {
   }
 
   return session;
+}
+
+export interface ViewOptions {
+  view?: "conversation" | "full";
+  roles?: ("user" | "assistant")[];
+}
+
+/** Projection only: never renumber or mutate the loaded source entries. */
+export function visibleEntries(session: LoadedSession, options: ViewOptions = {}): ReadEntry[] {
+  return session.entries.flatMap((entry) => {
+    if (options.roles?.length && !options.roles.includes(entry.kind as "user" | "assistant")) return [];
+    if (options.view !== "conversation") return [entry];
+    if (!entry.conversationText) return [];
+    return [{ ...entry, text: entry.conversationText, preview: makePreview(entry.conversationText), toolNames: [] }];
+  });
+}
+
+export function conversationEntries(session: LoadedSession): ConversationEntry[] {
+  return visibleEntries(session, { view: "conversation" }).map((entry) => ({
+    index: entry.index, id: entry.id, parentId: entry.parentId, timestampMs: entry.timestampMs,
+    role: entry.kind as "user" | "assistant", text: entry.text,
+  }));
+}
+
+/** Neighbors count visible messages, not hidden tool/thinking entries. */
+export function entriesAround(session: LoadedSession, around: number, context = 2, options: ViewOptions = {}): number[] {
+  if (!Number.isInteger(around) || around < 1 || around > session.entries.length) throw new Error("around is outside this session.");
+  const entries = visibleEntries(session, options);
+  const before = context ? entries.filter((e) => e.index < around).slice(-context) : [];
+  const after = entries.filter((e) => e.index > around).slice(0, context);
+  return [...before, ...entries.filter((e) => e.index === around), ...after].map((e) => e.index);
 }
 
 /**
