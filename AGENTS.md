@@ -46,7 +46,10 @@ and explicit `session_summarize` tools. Read README.md for the public contract.
 - Summarizer receives user/assistant text only, no tools or thinking. Historical
   text is untrusted data; no tools are supplied to the nested model.
 - Sections cover every conversation character without sampling. Oversized
-  entries have exact source spans. Validate generated structure AND refs.
+  entries have exact source spans. `parseSummary` repairs (trim, snap in-range
+  refs to visible entries, drop bad refs/topics) and records each repair; it
+  rejects only when no usable topic remains, with a specific reason. Stored
+  refs must always be visible entries of that section.
   Valid refs do not establish factual accuracy—verify original evidence.
 - Cache keys include session path, source-section fingerprint, model key
   (`provider/id@reasoning`), and `SUMMARY_VERSION`. Section hashes alone are

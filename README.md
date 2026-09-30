@@ -32,6 +32,9 @@ Local package paths in `~/.pi/agent/settings.json` resolve relative to that file
 { "packages": ["../../projects/pi-session-search"] }
 ```
 
+**Upgrading to 0.4.1:** `SUMMARY_VERSION` 2 (lenient validator, prompt
+wording). Earlier summaries/caches and calibration stats are not reused.
+
 **Upgrading to 0.4:** summary cache keys now include the reasoning level
 (`provider/model@low`), so 0.3 caches are not reused. `session_summarize`
 takes `path`, `paths`, or `scope`, and plan output/details changed shape.
@@ -168,8 +171,12 @@ never changed. Normal searches and reads never generate summaries.
   independent call: no cross-section context and no session-level rollup.
 - Each section produces an overview and topic records: intent, proposals,
   decisions/outcomes, open questions, keywords/aliases, and source indices.
-  JSON shape, size, and source references are validated. This is **not factual
-  validation**: summaries are navigation aids, not evidence.
+  Responses are **repaired rather than rejected**: over-limit text/lists are
+  trimmed, references to non-text entries inside the section snap to the
+  nearest preceding message, out-of-section references and unreferenced topics
+  are dropped. A paid response is discarded only if no usable topic remains,
+  with the exact reason. Repairs are stored with the section and in the call
+  log. This is **not factual validation**: summaries are navigation aids.
 - **Reasoning** (`reasoning`, default `low`) goes through pi's provider-neutral
   API and is clamped to what the model supports. The cache key is
   `provider/model@reasoning`; changing model, reasoning, or `SUMMARY_VERSION`

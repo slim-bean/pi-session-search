@@ -255,7 +255,7 @@ function failureLines(result: RunResult, limit = 8): string {
 export function formatRunResult(result: RunResult, options: { running?: boolean; busySkipped?: number; remaining?: PlanModelView; concurrency?: number } = {}): string {
   const status = options.running ? "running" : result.stopped ? "stopped" : result.remaining ? "incomplete" : "complete";
   return `Summary generation ${status} · ${result.model}\n` +
-    `${result.sessions} sessions · ${result.sections} sections: ${result.generated} generated, ${result.cached} previously cached, ${result.failed.length} failures, ${result.remaining} remaining.\n` +
+    `${result.sessions} sessions · ${result.sections} sections: ${result.generated} generated${result.repaired ? ` (${result.repaired} with validator repairs)` : ""}, ${result.cached} previously cached, ${result.failed.length} failures, ${result.remaining} remaining.\n` +
     `Calls: ${result.calls}. Usage: ${tokens(result.usage.input + result.usage.cacheRead + result.usage.cacheWrite)} input + ${tokens(result.usage.output)} output tokens; reported cost ${dollars(result.usage.cost.total)}.\n` +
     (options.running ? "" : `Published ${result.published} sessions this run; ${result.completeSessions}/${result.sessions} sessions complete.\n`) +
     (result.stopped ? `Stopped: ${clamp(result.stopped, 400)}\n` : "") +
@@ -275,7 +275,7 @@ export function formatCalibration(view: { scope: string; rows: CalibrationRow[];
     "Sections are cached for later generation; nothing is published.";
   const models = view.rows.map(({ model, result, plan }) => {
     const done = result.generated + result.failed.length;
-    return `${model.key} (reasoning ${model.reasoning}, max ${model.maxTokens} output tokens): ${result.generated} ok, ${result.failed.length} failed, ${result.cached} already cached; ` +
+    return `${model.key} (reasoning ${model.reasoning}, max ${model.maxTokens} output tokens): ${result.generated} ok${result.repaired ? ` (${result.repaired} repaired)` : ""}, ${result.failed.length} failed, ${result.cached} already cached; ` +
       `${done ? `this run ${tokens(result.usage.output / done)} output tokens/call, ${dollars(result.usage.cost.total)} total` : "no new calls"}.` +
       (result.stopped ? ` Stopped: ${clamp(result.stopped, 200)}` : "") +
       (plan.estimate.stats ? `\n  ${formatStats(plan.estimate.stats)}` : "") +

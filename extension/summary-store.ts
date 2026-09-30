@@ -1,7 +1,7 @@
 /** Rebuildable, model/version-keyed summary cache. Never writes source sessions. */
 import type { DatabaseSync } from "node:sqlite";
 
-export const SUMMARY_VERSION = "1";
+export const SUMMARY_VERSION = "2";
 export interface TopicSummary {
   title: string;
   summary: string;
@@ -17,6 +17,8 @@ export interface StoredSection {
   spans: { index: number; startChar: number; endChar: number }[];
   summary: SectionSummary;
   generatedAt: number;
+  /** Validator repairs applied to the model response (trimming, reference fixes, dropped topics). */
+  repairs?: string[];
 }
 export interface SummaryRecord {
   status: "ready" | "stale" | "partial" | "missing";
@@ -45,26 +47,28 @@ export function ensureSummarySchema(db: DatabaseSync): void {
       started_at INTEGER NOT NULL, duration_ms INTEGER NOT NULL, ok INTEGER NOT NULL, error TEXT,
       stop_reason TEXT, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
       cache_read_tokens INTEGER NOT NULL, cache_write_tokens INTEGER NOT NULL, cost REAL NOT NULL,
-      output_chars INTEGER NOT NULL, topics INTEGER NOT NULL
+      output_chars INTEGER NOT NULL, topics INTEGER NOT NULL, repairs TEXT
     );
     CREATE INDEX IF NOT EXISTS summary_calls_model ON summary_calls(model, version);
   `);
+  // 0.4.0 created summary_calls without repairs.
+  if (!(db.prepare(`PRAGMA table_info(summary_calls)`).all() as any[]).some((c) => c.name === "repairs")) db.exec(`ALTER TABLE summary_calls ADD COLUMN repairs TEXT`);
 }
 
 export interface CallRecord {
   model: string; purpose: string; sessionPath: string; sectionHash: string; inputChars: number;
   startedAt: number; durationMs: number; ok: boolean; error?: string; stopReason?: string;
   inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number;
-  cost: number; outputChars: number; topics: number;
+  cost: number; outputChars: number; topics: number; repairs?: string;
 }
 
 export function logCall(db: DatabaseSync, call: CallRecord): void {
   db.prepare(`INSERT INTO summary_calls (model, version, purpose, session_path, section_hash, input_chars, started_at,
-    duration_ms, ok, error, stop_reason, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost, output_chars, topics)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    duration_ms, ok, error, stop_reason, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost, output_chars, topics, repairs)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
     call.model, SUMMARY_VERSION, call.purpose, call.sessionPath, call.sectionHash, call.inputChars, call.startedAt,
     call.durationMs, call.ok ? 1 : 0, call.error ?? null, call.stopReason ?? null, call.inputTokens, call.outputTokens,
-    call.cacheReadTokens, call.cacheWriteTokens, call.cost, call.outputChars, call.topics);
+    call.cacheReadTokens, call.cacheWriteTokens, call.cost, call.outputChars, call.topics, call.repairs ?? null);
 }
 
 export function cachedSection(db: DatabaseSync, path: string, hash: string, model: string): StoredSection | undefined {

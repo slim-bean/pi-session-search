@@ -112,11 +112,45 @@ try {
 
   const bad = planSummary(index, path, "fake/bad-model", 2000);
   const badReply = JSON.parse(reply(bad.sections[0]!.input)); badReply.topics[0].entries = [99999];
-  assert.throws(() => parseSummary(JSON.stringify(badReply), bad.sections[0]!), /source references/);
+  assert.throws(() => parseSummary(JSON.stringify(badReply), bad.sections[0]!), /No usable topics.*no valid source references/);
   assert.throws(() => parseSummary("not json", bad.sections[0]!), /valid JSON/);
+  assert.throws(() => parseSummary('{"overview":"x","topics":[]}', bad.sections[0]!), /no topics array/);
+
+  // Repair, don't reject: only discard a paid response when nothing usable remains.
+  const sec = bad.sections[0]!;
+  const first = sec.spans[0]!.index;
+  const long = (n: number) => "x".repeat(n);
+  const messy = parseSummary("Here you go:\n" + JSON.stringify({ overview: long(1500), topics: [
+    { title: long(200), summary: long(2000), keywords: [...Array.from({ length: 20 }, (_, i) => `k${i}`), long(150), 7], entries: [first, String(first), `#${first}`, 99999] },
+    { title: "No refs", summary: "s", keywords: [], entries: [99999] },
+    { summary: "untitled", entries: [first] },
+    ...Array.from({ length: 17 }, (_, i) => ({ title: `T${i}`, summary: "s", keywords: ["a"], entries: [first] })),
+  ] }) + "\nThanks!", sec);
+  assert.equal(messy.summary.overview.length, 1200); assert.equal(messy.summary.topics.length, 16);
+  const t0 = messy.summary.topics[0]!;
+  assert.equal(t0.title.length, 160); assert.equal(t0.summary.length, 1800); assert.equal(t0.keywords.length, 16);
+  assert.deepEqual(t0.entries, [first], "numeric-string refs accepted and deduplicated");
+  for (const needle of ["outside the JSON", "overview trimmed", "outside section", "missing title", "no valid source references", "topics reduced to 16", "keywords reduced"]) {
+    assert(messy.repairs.some((r) => r.includes(needle)), `repair noted: ${needle}\n${messy.repairs.join("\n")}`);
+  }
+  const noOverview = parseSummary(JSON.stringify({ topics: [{ title: "Only", summary: "s", entries: [first] }] }), sec);
+  assert.equal(noOverview.summary.overview, "Only"); assert.deepEqual(noOverview.summary.topics[0]!.keywords, []);
+  // References to hidden entries (tool calls) between visible messages snap to the preceding visible one.
+  const gappy = { ...sec, startIndex: 3, endIndex: 6, spans: [{ ...sec.spans[0]!, index: 3 }, { ...sec.spans[0]!, index: 6 }] };
+  const snapped = parseSummary(JSON.stringify({ overview: "o", topics: [{ title: "t", summary: "s", keywords: [], entries: [4, 5, 6, 2, 7] }] }), gappy);
+  assert.deepEqual(snapped.summary.topics[0]!.entries, [3, 6]);
+  assert(snapped.repairs.some((r) => r.includes("snapped")) && snapped.repairs.some((r) => r.includes("[2,7]")));
+  const clean = parseSummary(reply(sec.input), sec);
+  assert.deepEqual(clean.repairs, [], "valid responses need no repairs");
   const invalid = await generateSummary(index, bad, async () => ({ text: "not json", usage }));
   assert.equal(invalid.failed.length, 4, "failed sections are skipped, not fatal, until the call cap");
-  assert.match(invalid.failed[0]!.error, /valid JSON/); assert.equal(invalid.generated, 0); assert.equal(invalid.usage.totalTokens, 120);
+  assert.match(invalid.failed[0]!.error, /valid JSON/);
+  const repairedRun = await runSummaries(index, [bad], async (_s, input) => ({ text: "```json\n" + JSON.stringify({ topics: [{ title: "t", summary: "s", entries: [JSON.parse(input)[0].index] }] }) + "\n```", usage }),
+    { key: "fake/repair", purpose: "generate", publish: false, maxCalls: 1 });
+  assert.equal(repairedRun.generated, 1); assert.equal(repairedRun.repaired, 1);
+  const repairedSection = cachedSection(index.db, path, bad.sections[0]!.hash, "fake/repair")!;
+  assert(repairedSection.repairs?.some((r) => r.includes("overview")));
+  assert.match((index.db.prepare("SELECT repairs FROM summary_calls WHERE model = 'fake/repair'").get() as any).repairs, /overview/); assert.equal(invalid.generated, 0); assert.equal(invalid.usage.totalTokens, 120);
   assert(!cachedSection(index.db, path, bad.sections[0]!.hash, bad.model));
   const failed = await generateSummary(index, bad, async () => ({ text: "", usage, error: "provider failed" }));
   assert.equal(failed.failed[0]!.error, "provider failed"); assert.equal(failed.usage.totalTokens, 120);

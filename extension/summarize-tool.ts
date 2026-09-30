@@ -168,7 +168,7 @@ export function registerSummarizeTool(pi: ExtensionAPI, getIndex: () => SessionI
           const wanted = new Set(sample.map(({ plan, section }) => `${plan.path}\0${section.hash}`));
           let result: RunResult;
           if (params.maxCost !== undefined && spent >= params.maxCost) {
-            result = { model: model.key, sessions: 0, sections: sample.length, cached: 0, generated: 0, remaining: sample.length, calls: 0, failed: [], published: 0, completeSessions: 0, usage: emptyUsage(), stopped: `Skipped: the $${params.maxCost} cost ceiling was reached.` };
+            result = { model: model.key, sessions: 0, sections: sample.length, cached: 0, generated: 0, remaining: sample.length, calls: 0, repaired: 0, failed: [], published: 0, completeSessions: 0, usage: emptyUsage(), stopped: `Skipped: the $${params.maxCost} cost ceiling was reached.` };
           } else {
             result = await runSummaries(index, plans, summaryCompleter(ctx.modelRegistry, model, combined), {
               key: model.key, purpose: "calibrate", publish: false, maxCalls: sample.length,
