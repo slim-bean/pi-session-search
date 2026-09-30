@@ -1,6 +1,5 @@
 /** LLM-facing tools, deliberately separate from the synchronous live picker. */
-import { randomUUID } from "node:crypto";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { defaultSessionsRoot, type SessionIndex } from "./indexer.ts";
@@ -8,30 +7,17 @@ import { entriesAround, loadSessionFile, parseEntryRanges, resolveSessionPath } 
 import { fingerprint } from "./session-file.ts";
 import { searchProjects, searchSessions, type SearchOptions } from "./search.ts";
 import { readSummary } from "./summary-store.ts";
-import { generateSummary, loadConversation, planSummary, SECTION_CHARS } from "./summarizer.ts";
+import { loadConversation } from "./summarizer.ts";
+import { registerSummarizeTool } from "./summarize-tool.ts";
+import { match, maxChars } from "./schemas.ts";
 import {
   formatEntriesRead, formatOverview, formatProjectPage, formatSearchPage, formatSessionMatches,
-  formatSummary, formatSummaryPlan, formatSummaryProgress, formatSyncWarning, READ_BUDGET,
+  formatSummary, formatSyncWarning, READ_BUDGET,
 } from "./format.ts";
 
-const maxChars = Type.Optional(Type.Integer({ minimum: 2000, maximum: 40_000, description: "Output character budget (default 16000 search, 20000 read). Pagination/continuation hints preserve access to omitted content." }));
-const match = Type.Optional(StringEnum(["all", "any"] as const, { description: "Require all terms (default) or any term within one entry." }));
 const offset = Type.Optional(Type.Integer({ minimum: 0, description: "Zero-based result offset; keep the same query/filters when paging." }));
 
-function modelFor(ctx: ExtensionContext, name?: string) {
-  if (!name) {
-    if (!ctx.model) throw new Error("No active model. Select one or specify provider/model.");
-    return ctx.model;
-  }
-  const slash = name.indexOf("/");
-  if (slash < 1) throw new Error("model must be provider/model-id.");
-  const model = ctx.modelRegistry.find(name.slice(0, slash), name.slice(slash + 1));
-  if (!model) throw new Error(`Model not found: ${name}`);
-  return model;
-}
-
 export function registerSessionTools(pi: ExtensionAPI, getIndex: () => SessionIndex, shutdown: AbortSignal): void {
-  const generating = new Set<string>();
   pi.registerTool({
     name: "session_search", label: "Session Search",
     description: "Search or browse past pi sessions using a local keyword index; no model calls. " +
@@ -145,61 +131,5 @@ export function registerSessionTools(pi: ExtensionAPI, getIndex: () => SessionIn
     },
   });
 
-  pi.registerTool({
-    name: "session_summarize", label: "Session Summarize",
-    description: "Plan or explicitly generate a cached, search-oriented topic outline of ONE indexed session. " +
-      "action:plan (default) is local/no-cost; reports uncached work for a chosen model. action:generate sends user/assistant text to that model's provider and incurs usage. " +
-      "Only use generate when the user requests summary indexing, never automatically during history searches. " +
-      "No tools, thinking, images, or compaction text is sent. All conversation text is processed in bounded sections, never sampled. " +
-      "Successful sections are cached by source/model/version; repeated calls resume. Only complete, fresh summaries enter search. " +
-      "Read published summaries via session_read(view:summary). Source sessions are never modified.",
-    promptSnippet: "Plan or explicitly generate resumable, cached topic summaries (generation makes paid model calls)",
-    promptGuidelines: ["Use session_summarize action:plan before generating. Use action:generate only when the user explicitly requests creating/updating summary indexes; ordinary session_search/session_read never require it."],
-    parameters: Type.Object({
-      path: Type.String({ description: "One session JSONL path from session_search." }),
-      action: Type.Optional(StringEnum(["plan", "generate"] as const, { description: "plan (default): no model calls. generate: paid, explicit, resumable indexing." })),
-      model: Type.Optional(Type.String({ description: "provider/model-id (default active model). Uses pi's model registry/auth; never changes the active model." })),
-      maxSections: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, description: "Maximum new section calls for this invocation (default 4). Cached sections are free; call again to continue." })),
-    }),
-    async execute(_id, params, signal, onUpdate, ctx) {
-      const combined = AbortSignal.any([shutdown, ...(signal ? [signal] : [])]);
-      combined.throwIfAborted();
-      const index = getIndex();
-      await index.sync(defaultSessionsRoot());
-      combined.throwIfAborted();
-      const path = resolveSessionPath(params.path, ctx.cwd);
-      const model = modelFor(ctx, params.model);
-      const modelName = `${model.provider}/${model.id}`;
-      // Conservative character-based ceiling even for non-English/code-heavy text.
-      const sectionChars = Math.min(SECTION_CHARS, model.contextWindow - 8000);
-      if (sectionChars < 1000) throw new Error("Summary generation requires a model with at least a 9000-token context window.");
-      const plan = planSummary(index, path, modelName, sectionChars);
-      const maxSections = params.maxSections ?? 4;
-      if (params.action !== "generate") return {
-        content: [{ type: "text", text: formatSummaryPlan(plan, maxSections) }],
-        details: { path, model: modelName, sections: plan.sections.length, cached: plan.cached, remaining: plan.remaining, inputChars: plan.inputChars },
-      };
-      if (generating.has(path)) throw new Error("Summary generation for this session is already running. Retry after it finishes.");
-      if (plan.remaining && !ctx.modelRegistry.hasConfiguredAuth(model)) throw new Error(`No authentication configured for ${modelName}.`);
-      generating.add(path);
-      try {
-        onUpdate?.({ content: [{ type: "text", text: formatSummaryPlan(plan, maxSections) }], details: { path, model: modelName } });
-        const progress = await generateSummary(index, plan, async (systemPrompt, input, callSignal) => {
-          const response = await ctx.modelRegistry.complete(model, {
-            systemPrompt, messages: [{ role: "user", content: input, timestamp: Date.now() }],
-          }, {
-            signal: AbortSignal.any([combined, ...(callSignal ? [callSignal] : []), AbortSignal.timeout(120_000)]),
-            maxTokens: Math.min(4096, model.maxTokens), reasoningEffort: "low", sessionId: randomUUID(),
-          });
-          if (response.stopReason === "error" || response.stopReason === "aborted" || response.stopReason === "length") {
-            return { text: "", usage: response.usage, error: response.errorMessage ?? `Summary model stopped: ${response.stopReason}` };
-          }
-          return { text: response.content.filter((block) => block.type === "text").map((block) => block.text).join("\n"), usage: response.usage };
-        }, { signal: combined, maxSections, onProgress: (progress) => onUpdate?.({
-          content: [{ type: "text", text: formatSummaryProgress(progress) }], details: { path, ...progress },
-        }) });
-        return { content: [{ type: "text", text: formatSummaryProgress(progress) }], details: { path, ...progress }, usage: progress.usage };
-      } finally { generating.delete(path); }
-    },
-  });
+  registerSummarizeTool(pi, getIndex, shutdown);
 }

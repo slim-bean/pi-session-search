@@ -9,8 +9,9 @@ compact evidence, and optional, inspectable topic summaries—not vectors.
 - `session_search` — lexical search, session browsing, and project discovery.
 - `session_read` — conversation text, context around a hit, full forensic
   entries, or cached topic summaries.
-- `session_summarize` — explicitly plan/generate cached topic summaries.
-  **Only generation makes additional model calls.**
+- `session_summarize` — plan (free cost estimate), calibrate (compare models on
+  a small sample), and generate cached topic summaries for one session or a
+  whole filtered scope. **Only calibrate/generate make model calls.**
 
 ## Install
 
@@ -30,6 +31,10 @@ Local package paths in `~/.pi/agent/settings.json` resolve relative to that file
 ```json
 { "packages": ["../../projects/pi-session-search"] }
 ```
+
+**Upgrading to 0.4:** summary cache keys now include the reasoning level
+(`provider/model@low`), so 0.3 caches are not reused. `session_summarize`
+takes `path`, `paths`, or `scope`, and plan output/details changed shape.
 
 **Upgrading from 0.2:** the index rebuilds automatically on first search.
 `session_read` now defaults to conversation-only text; request `view:"full"`
@@ -134,41 +139,64 @@ session_read({ path: "...jsonl", view: "summary" })
 ## Optional summary indexing
 
 ```js
-// Free/local planning: chooses the active model unless one is specified.
-session_summarize({ path: "...jsonl", action: "plan" })
+// Free/local: scope, cached vs. remaining work, cost estimate per model.
+session_summarize({ scope: { all: true }, models: ["openai/gpt-6-luna", "anthropic/claude-sonnet-5"] })
 
-// Explicit paid work: use the model reported by the plan.
-session_summarize({
-  path: "...jsonl", action: "generate",
-  model: "provider/model-id", maxSections: 4
-})
+// Paid, small: same size-spread sample through each model; measures tokens,
+// cost, latency, failures; shows a side-by-side topic comparison. Not published.
+session_summarize({ action: "calibrate", scope: { all: true },
+  models: ["openai/gpt-6-luna", "anthropic/claude-sonnet-5"], samples: 6 })
+
+// Paid batch: parallel, bounded, resumable; publishes complete sessions.
+session_summarize({ action: "generate", scope: { project: "~/projects/x", projectScope: "tree" },
+  model: "openai/gpt-6-luna", maxSections: 500, maxCost: 5, concurrency: 8 })
 ```
 
-Generation sends historical **user/assistant text** to the selected provider
-using pi's model registry and existing authentication. It does not change the
-active model. Check the plan/provider before generating sensitive history.
-Normal searches and reads never generate summaries automatically.
+**Targets:** exactly one of `path`, `paths`, or `scope`. `scope` uses
+`session_search` filters (`query`, `anyOf`, `project`, `projectScope`, `since`,
+`until`, `dateField`); with no filter it requires `all: true`. The current
+session is excluded unless `excludeCurrent: false` (it keeps changing).
 
-- One session per call; discover a batch with `session_search`, then plan or
-  generate each explicitly. Default work cap: 4 new calls; maximum: 20.
+**What is sent:** historical **user/assistant text** only, through pi's model
+registry and existing authentication, to the named provider. Never tools,
+thinking, images, or compaction text. The active model is the default but is
+never changed. Normal searches and reads never generate summaries.
+
 - Whole messages are packed into bounded sections (at most 24,000 serialized
   input characters; smaller for limited-context models). Oversized messages
-  are split with exact source offsets. **No sampling.**
+  are split with exact source offsets. **No sampling.** Each section is one
+  independent call: no cross-section context and no session-level rollup.
 - Each section produces an overview and topic records: intent, proposals,
   decisions/outcomes, open questions, keywords/aliases, and source indices.
-  The prompt requests attribution and cautions about branches/incomplete context.
-- JSON shape, size, and source references are validated. This is **not factual
-  validation**: generated summaries are navigation aids, never authoritative
-  evidence of what was decided or implemented.
-- Successful sections persist immediately. Repeat a call with the same
-  path/model to resume after a work cap, cancellation, or failure. Unchanged
-  sections are reused after appends. Model/version changes use separate cache keys.
+  JSON shape, size, and source references are validated. This is **not factual
+  validation**: summaries are navigation aids, not evidence.
+- **Reasoning** (`reasoning`, default `low`) goes through pi's provider-neutral
+  API and is clamped to what the model supports. The cache key is
+  `provider/model@reasoning`; changing model, reasoning, or `SUMMARY_VERSION`
+  means new generation. Output ceiling: 8,192 tokens (thinking + answer);
+  only generated tokens are billed.
+- **Budgets:** `maxSections` caps new calls per invocation (default 4);
+  `maxCost` is an approximate USD ceiling on reported cost (one call runs first
+  to learn per-call cost; in-flight calls can overshoot slightly).
+  `concurrency` defaults to 4 (max 16). A failed section is billed, logged,
+  and skipped; five consecutive failures stop the run. Repeat the same call to
+  resume: cached sections are free, failed ones retry.
+- **Estimates:** every billed call is logged (tokens, cost, latency, stop
+  reason, failure; no text) in `summary_calls`. Plans for a model key with
+  logged calls are **calibrated**: measured input tokens/char, mean output
+  tokens, failure rate (retries), and wall time at the chosen concurrency.
+  Otherwise they show a **rough range** (2.4–4 chars/token, 1k–4k output
+  tokens per call). Prices come from pi's model registry.
+- **Calibration** picks a deterministic sample spread across the scope's
+  section-size distribution, the same sections for every model. The sample's
+  sections are cached (reused by a later `generate` with that key), never
+  published, and never replace a published summary.
 - Only a **complete, fresh generation** is published to FTS5. Edits mark old
   summaries stale and remove them from search on sync. A source change during
-  generation prevents publication. Cached sections remain reusable.
-- Provider calls are abortable and have a two-minute deadline each. Reported
-  nested usage is returned to pi, including usage from completed requests
-  before a later validation/failure/cancellation.
+  generation prevents publication. Cached sections remain reusable; appends
+  normally regenerate only the final section.
+- Provider calls are abortable (Esc cancels the tool) and have a three-minute
+  deadline each. Nested usage is returned to pi, including failed attempts.
 - No daemon, embeddings, automatic reranker, or session-file mutation.
 
 ## Interactive picker
@@ -202,14 +230,18 @@ excluded. Index and reader share JSONL parsing/ordinals. No build step.
 ```text
 extension/
   index.ts          registration/lifecycle and /session-search
-  tools.ts          three LLM-facing tool schemas/handlers
+  tools.ts          session_search/session_read; registers session_summarize
   panel.ts          live picker components
   session-file.ts   shared parser, text extraction, fingerprints
   indexer.ts        incremental FTS5 storage/sync
   search.ts         lexical queries, filters, grouping, snippets
   reader.ts         full source rendering and filtered projections
-  summary-store.ts  versioned cache, freshness, publication
-  summarizer.ts     bounded/resumable generation, validation
+  schemas.ts        shared tool parameter schemas
+  summarize-tool.ts session_summarize: targets, plan/calibrate/generate
+  summary-store.ts  versioned cache, freshness, publication, call log
+  summarizer.ts     sections, prompt, validation, parallel bounded engine
+  summary-model.ts  model resolution, reasoning clamp, streamSimple adapter
+  summary-estimate.ts call stats, cost/time projection, calibration sample
   format.ts         bounded LLM-facing output
 ```
 

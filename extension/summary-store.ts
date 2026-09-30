@@ -38,7 +38,33 @@ export function ensureSummarySchema(db: DatabaseSync): void {
       session_path TEXT PRIMARY KEY, source_hash TEXT NOT NULL, model TEXT NOT NULL,
       version TEXT NOT NULL, section_hashes TEXT NOT NULL, generated_at INTEGER NOT NULL
     );
+    -- Per-call accounting (no conversation text). Feeds calibrated estimates.
+    CREATE TABLE IF NOT EXISTS summary_calls (
+      id INTEGER PRIMARY KEY, model TEXT NOT NULL, version TEXT NOT NULL, purpose TEXT NOT NULL,
+      session_path TEXT NOT NULL, section_hash TEXT NOT NULL, input_chars INTEGER NOT NULL,
+      started_at INTEGER NOT NULL, duration_ms INTEGER NOT NULL, ok INTEGER NOT NULL, error TEXT,
+      stop_reason TEXT, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+      cache_read_tokens INTEGER NOT NULL, cache_write_tokens INTEGER NOT NULL, cost REAL NOT NULL,
+      output_chars INTEGER NOT NULL, topics INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS summary_calls_model ON summary_calls(model, version);
   `);
+}
+
+export interface CallRecord {
+  model: string; purpose: string; sessionPath: string; sectionHash: string; inputChars: number;
+  startedAt: number; durationMs: number; ok: boolean; error?: string; stopReason?: string;
+  inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number;
+  cost: number; outputChars: number; topics: number;
+}
+
+export function logCall(db: DatabaseSync, call: CallRecord): void {
+  db.prepare(`INSERT INTO summary_calls (model, version, purpose, session_path, section_hash, input_chars, started_at,
+    duration_ms, ok, error, stop_reason, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost, output_chars, topics)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    call.model, SUMMARY_VERSION, call.purpose, call.sessionPath, call.sectionHash, call.inputChars, call.startedAt,
+    call.durationMs, call.ok ? 1 : 0, call.error ?? null, call.stopReason ?? null, call.inputTokens, call.outputTokens,
+    call.cacheReadTokens, call.cacheWriteTokens, call.cost, call.outputChars, call.topics);
 }
 
 export function cachedSection(db: DatabaseSync, path: string, hash: string, model: string): StoredSection | undefined {

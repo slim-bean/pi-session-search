@@ -3,8 +3,11 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { visibleEntries, type LoadedSession, type ReadEntry, type ViewOptions } from "./reader.ts";
 import { HL_END, HL_START, extractTokens, makeSnippet, type SearchHit, type SearchPage, type ProjectPage, type SearchOptions } from "./search.ts";
-import type { SummaryRecord } from "./summary-store.ts";
-import type { SummaryPlan, SummaryProgress } from "./summarizer.ts";
+import type { DatabaseSync } from "node:sqlite";
+import { cachedSection, type SummaryRecord } from "./summary-store.ts";
+import type { RunResult, SummaryPlan, SummarySection } from "./summarizer.ts";
+import type { CallStats, Estimate } from "./summary-estimate.ts";
+import type { SummaryModel } from "./summary-model.ts";
 
 export const OUTLINE_LIMIT = 50;
 export const FIND_LIMIT = 20;
@@ -201,21 +204,107 @@ export function formatSessionMatches(session: LoadedSession, query: string, opti
   matches.length, offset, options.maxChars ?? READ_BUDGET, 'Read a match with around:<index>, context:2 or entries:"<index>".').text;
 }
 
-export function formatSummaryPlan(plan: SummaryPlan, maxSections: number): string {
-  return `Summary plan (no model calls yet)\nFile: ${prettyPath(plan.path)}\nModel/provider: ${plan.model}\n` +
-    `${plan.conversationChars} conversation characters; ${plan.sections.length} sections; ${plan.cached} cached; ${plan.remaining} need generation.\n` +
-    `Uncached section inputs: ${plan.inputChars} characters plus instructions. This invocation will make at most ${Math.min(maxSections, plan.remaining)} new model calls (up to 4096 output tokens each).\n` +
-    `Generation sends historical user/assistant text to the named provider and incurs model usage. No sampling, tools, thinking, or images.\n` +
-    `Only if requested: session_summarize(action:"generate", path, model:${JSON.stringify(plan.model)}, maxSections:${maxSections}).`;
+function tokens(n: number): string { return n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : `${Math.round(n)}`; }
+function dollars(n: number): string { return n >= 100 ? `$${n.toFixed(0)}` : n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(4)}`; }
+function range(pair: [number, number], unit: (n: number) => string): string { return Math.abs(pair[1] - pair[0]) < 1e-9 ? unit(pair[0]) : `${unit(pair[0])}–${unit(pair[1])}`; }
+function fit(text: string, maxChars: number): string { return text.length > maxChars ? text.slice(0, maxChars - 40) + "\n[output shortened for budget]" : text; }
+function duration(ms: number): string { return ms >= 3_600_000 ? `${(ms / 3_600_000).toFixed(1)} h` : ms >= 60_000 ? `${Math.round(ms / 60_000)} min` : `${Math.round(ms / 1000)} s`; }
+
+export function formatEstimate(estimate: Estimate, concurrency: number): string {
+  if (!estimate.calls) return "Nothing to generate: every section is cached.";
+  const cost = estimate.cost ? `cost ${range(estimate.cost, dollars)}` : "cost unknown (no registry price)";
+  if (estimate.calibrated) {
+    const s = estimate.stats!;
+    return `Estimate (calibrated from ${s.calls} logged calls, ${(s.failureRate * 100).toFixed(0)}% failed, ~${Math.round(s.meanOutputTokens)} output tokens/call): ` +
+      `input ${tokens(estimate.inputTokens[0])}, output ${tokens(estimate.outputTokens[0])} tokens, ${cost}` +
+      (estimate.wallMs ? `, ~${duration(estimate.wallMs)} at concurrency ${concurrency}` : "") + ". Failure retries included.";
+  }
+  return `Estimate (ROUGH, uncalibrated): input ${range(estimate.inputTokens, tokens)}, output ${range(estimate.outputTokens, tokens)} tokens, ${cost}. ` +
+    "Output tokens dominate the uncertainty; action:\"calibrate\" measures them on a small sample.";
 }
 
-export function formatSummaryProgress(progress: SummaryProgress): string {
-  return `Summary ${progress.complete ? "published" : "incomplete"} · ${progress.model}\n` +
-    `${progress.generated} generated; ${progress.cached} reused; ${progress.remaining} remaining of ${progress.total} sections.\n` +
-    `Usage: ${progress.usage.totalTokens} tokens; reported cost $${progress.usage.cost.total.toFixed(6)}.\n` +
-    (progress.error ? `Stopped: ${clamp(progress.error, 2000)}\n` : "") +
-    (progress.complete ? 'Available in session_search and session_read(view:"summary"). Verify claims against source entries.' :
-      'Successful sections are cached. Repeat session_summarize with the same path/model to resume; incomplete/stale generations are not published to search.');
+export function formatStats(s: CallStats): string {
+  return `Measured over ${s.calls} logged calls: ${(s.failureRate * 100).toFixed(0)}% failed, ${(1 / s.tokensPerChar).toFixed(2)} input chars/token, ` +
+    `~${Math.round(s.meanOutputTokens)} output tokens/call, ~${dollars(s.meanCost)}/call, ~${duration(s.meanDurationMs)}/call.`;
+}
+
+export interface PlanModelView {
+  key: string; sections: number; cached: number; remaining: number;
+  completeSessions: number; publishedSessions: number; largestSession: number; estimate: Estimate;
+}
+export function formatSummaryPlan(view: { scope: string; sessions: number; models: PlanModelView[]; maxSections: number; maxCost?: number; concurrency: number }, maxChars = 16_000): string {
+  const blocks = view.models.map((m) =>
+    `Model ${m.key}: ${m.sections} sections; ${m.cached} cached; ${m.remaining} need generation (${tokens(m.estimate.inputChars)} input chars incl. instructions).\n` +
+    `  Sessions complete: ${m.completeSessions}/${view.sessions}; published with this model: ${m.publishedSessions}. Largest uncached session: ${m.largestSession} sections.\n` +
+    `  ${formatEstimate(m.estimate, view.concurrency)}`);
+  const head = `Summary plan (no model calls yet)\nScope: ${view.scope}`;
+  const remaining = Math.max(0, ...view.models.map((m) => m.remaining));
+  const foot = `Generation sends historical user/assistant text to the named provider and incurs usage. No sampling, tools, thinking, or images.\n` +
+    `Model keys include the reasoning level; each key has its own cache.\n` +
+    (remaining > view.maxSections ? `maxSections:${view.maxSections} covers ${view.maxSections} of ${remaining} calls per invocation; raise it (with maxCost) or repeat to resume.\n` : "") +
+    `Only if requested: session_summarize(action:"calibrate" | "generate", same scope, model, maxSections, maxCost${view.maxCost ? `:${view.maxCost}` : ""}, concurrency:${view.concurrency}).`;
+  return fit([head, ...blocks, foot].join("\n\n"), maxChars);
+}
+
+function failureLines(result: RunResult, limit = 8): string {
+  if (!result.failed.length) return "";
+  const lines = result.failed.slice(0, limit).map((f) => `- ${prettyPath(f.path)} #${f.startIndex}–#${f.endIndex}: ${clamp(f.error, 240)}`);
+  return `Failures (${result.failed.length}${result.failed.length > limit ? `, first ${limit}` : ""}; billed attempts are not cached, rerun to retry):\n${lines.join("\n")}\n`;
+}
+
+export function formatRunResult(result: RunResult, options: { running?: boolean; busySkipped?: number; remaining?: PlanModelView; concurrency?: number } = {}): string {
+  const status = options.running ? "running" : result.stopped ? "stopped" : result.remaining ? "incomplete" : "complete";
+  return `Summary generation ${status} · ${result.model}\n` +
+    `${result.sessions} sessions · ${result.sections} sections: ${result.generated} generated, ${result.cached} previously cached, ${result.failed.length} failures, ${result.remaining} remaining.\n` +
+    `Calls: ${result.calls}. Usage: ${tokens(result.usage.input + result.usage.cacheRead + result.usage.cacheWrite)} input + ${tokens(result.usage.output)} output tokens; reported cost ${dollars(result.usage.cost.total)}.\n` +
+    (options.running ? "" : `Published ${result.published} sessions this run; ${result.completeSessions}/${result.sessions} sessions complete.\n`) +
+    (result.stopped ? `Stopped: ${clamp(result.stopped, 400)}\n` : "") +
+    (options.busySkipped ? `${options.busySkipped} sessions skipped: another generation is running for them.\n` : "") +
+    failureLines(result) +
+    (options.remaining && options.remaining.remaining ? `Remaining work: ${formatEstimate(options.remaining.estimate, options.concurrency ?? 1)}\n` : "") +
+    (options.running ? "" : result.remaining
+      ? "Repeat the same call to resume; cached sections are free. Incomplete sessions are not published to search."
+      : 'Published sessions are available in session_search and session_read(view:"summary"). Verify claims against source entries.');
+}
+
+export interface CalibrationRow { model: SummaryModel; result: RunResult; sample: { plan: SummaryPlan; section: SummarySection }[]; plan: PlanModelView }
+
+export function formatCalibration(view: { scope: string; rows: CalibrationRow[]; db: DatabaseSync; busySkipped?: number; concurrency: number }, maxChars = 16_000): string {
+  const head = `Summary calibration · scope: ${view.scope}\n` +
+    `Sample: ${view.rows[0]?.sample.length ?? 0} sections per model, spread across the section-size distribution (same sections for every model with the same section budget). ` +
+    "Sections are cached for later generation; nothing is published.";
+  const models = view.rows.map(({ model, result, plan }) => {
+    const done = result.generated + result.failed.length;
+    return `${model.key} (reasoning ${model.reasoning}, max ${model.maxTokens} output tokens): ${result.generated} ok, ${result.failed.length} failed, ${result.cached} already cached; ` +
+      `${done ? `this run ${tokens(result.usage.output / done)} output tokens/call, ${dollars(result.usage.cost.total)} total` : "no new calls"}.` +
+      (result.stopped ? ` Stopped: ${clamp(result.stopped, 200)}` : "") +
+      (plan.estimate.stats ? `\n  ${formatStats(plan.estimate.stats)}` : "") +
+      `\n  Full scope (${plan.remaining} uncached sections): ${formatEstimate(plan.estimate, view.concurrency)}` +
+      (result.failed.length ? `\n  ${failureLines(result, 3).trim().replace(/\n/g, "\n  ")}` : "");
+  });
+  const first = view.rows[0]?.sample ?? [];
+  const comparisons = first.map(({ plan, section }, i) => {
+    const lines = [`Sample ${i + 1}: ${prettyPath(plan.path)} #${section.startIndex}–#${section.endIndex} (${formatSize(section.input.length)})`];
+    for (const row of view.rows) {
+      const match = row.sample.find((s) => s.plan.path === plan.path && s.section.startIndex === section.startIndex);
+      const cached = match ? cachedSection(view.db, plan.path, match.section.hash, row.model.key) : undefined;
+      const failure = row.result.failed.find((f) => f.path === plan.path && f.startIndex === section.startIndex);
+      lines.push(cached
+        ? `  [${row.model.key}] ${clamp(cached.summary.overview, 300)}\n    topics (${cached.summary.topics.length}): ${cached.summary.topics.map((t) => clamp(t.title, 70)).join(" | ")}`
+        : `  [${row.model.key}] ${failure ? `failed: ${clamp(failure.error, 160)}` : "not generated"}`);
+    }
+    return lines.join("\n");
+  });
+  const foot = "Compare coverage/precision of topics above; overviews and titles are clamped. Estimates use all logged calls for each model key and current registry prices." +
+    (view.busySkipped ? ` ${view.busySkipped} sessions skipped (generation already running).` : "");
+  let text = [head, ...models].join("\n\n");
+  let shown = 0;
+  for (const block of comparisons) {
+    if (text.length + block.length + foot.length + 200 > maxChars) break;
+    text += "\n\n" + block; shown++;
+  }
+  if (shown < comparisons.length) text += `\n\n[${comparisons.length - shown} sample comparisons omitted for the output budget; raise maxChars (max 40000).]`;
+  return fit(text + "\n\n" + foot, maxChars);
 }
 
 export function formatSummary(record: SummaryRecord, path: string, options: PageOptions = {}): string {

@@ -27,7 +27,8 @@ and explicit `session_summarize` tools. Read README.md for the public contract.
   alternatives are OR'd, AND'd with the base query. Project filters are cwd
   metadata constraints, independent of text. Activity dates are message times,
   not filesystem mtimes. Current session exclusion is a tool default only.
-- `index.ts` shares one lazily created `SessionIndex`; tools live in `tools.ts`,
+- `index.ts` shares one lazily created `SessionIndex`; tools live in `tools.ts`
+  and `summarize-tool.ts`,
   picker in `panel.ts`. Syncs are coalesced. Shutdown aborts generation and
   waits for a yielding sync before closing SQLite.
 - All LLM-facing output belongs in `format.ts`. Preserve budgets, counts,
@@ -37,19 +38,32 @@ and explicit `session_summarize` tools. Read README.md for the public contract.
 ## Summary safety/lifecycle
 
 - Search/read/plan NEVER invoke a model. Only explicit `session_summarize`
-  `action:generate` does, through `ctx.modelRegistry.complete` using pi auth.
+  `action:calibrate|generate` do, via `summary-model.ts`:
+  `ctx.modelRegistry.streamSimple(...).result()` with `reasoning` clamped by
+  pi-ai `clampThinkingLevel`. Never pass provider-specific options through
+  `complete()`: Anthropic ignores `reasoningEffort`, and managed-effort Claude
+  models then default to effort "high" inside the output ceiling.
 - Summarizer receives user/assistant text only, no tools or thinking. Historical
   text is untrusted data; no tools are supplied to the nested model.
 - Sections cover every conversation character without sampling. Oversized
   entries have exact source spans. Validate generated structure AND refs.
   Valid refs do not establish factual accuracy—verify original evidence.
-- Cache keys include source-section fingerprint, model, and `SUMMARY_VERSION`.
+- Cache keys include session path, source-section fingerprint, model key
+  (`provider/id@reasoning`), and `SUMMARY_VERSION`. Section hashes alone are
+  not unique across sessions; select/compare by path + hash.
   Changing prompt/schema/segmentation semantics requires bumping that version.
   Only complete manifests matching the indexed conversation hash/version
   enter FTS. Sync also purges version-stale generated rows even if files didn't
   change. Check the source again before publishing after async model work.
-- Persist sections between calls; cap new calls; propagate cancellation and
+- `runSummaries` is the single engine (one session or a scope): bounded
+  concurrency, call cap, approximate cost ceiling (learn one call's cost
+  before fanning out), skip-and-log failed sections, stop after 5 consecutive
+  failures. Persist sections as they succeed; propagate cancellation and
   provider deadlines; report nested usage even after partial failure.
+- `summary_calls` logs every billed, non-aborted attempt (no text) and drives
+  calibrated estimates; it survives session deletion (it's accounting).
+  Calibration caches sample sections but never publishes or replaces a
+  published summary.
   Do not prune other model/version caches during publication: another pi
   process could be generating them. Deleting a session cleans all its caches.
 - Source session files are never modified. Derived data is private, local,

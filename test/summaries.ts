@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { rmSync } from "node:fs";
 import { SessionIndex } from "../extension/indexer.ts";
-import { buildSections, generateSummary, loadConversation, parseSummary, planSummary } from "../extension/summarizer.ts";
+import { buildSections, loadConversation, parseSummary, planSummary, runSummaries, type CompleteSummary, type SummaryPlan } from "../extension/summarizer.ts";
 import { cachedSection, readSummary, SUMMARY_VERSION } from "../extension/summary-store.ts";
 import { fingerprint } from "../extension/session-file.ts";
 import { searchSessions } from "../extension/search.ts";
@@ -18,6 +18,8 @@ const reply = (input: string) => {
   const spans = JSON.parse(input);
   return JSON.stringify({ overview: "Conversation overview", topics: [{ title: "Semantic retrieval", summary: "The user asked about finding previous work; the assistant suggested an experiment, not an implemented feature.", keywords: ["semantic discovery", "topic navigation"], entries: [spans[0].index] }] });
 };
+const generateSummary = (index: SessionIndex, plan: SummaryPlan, complete: CompleteSummary, options: { maxSections?: number; signal?: AbortSignal } = {}) =>
+  runSummaries(index, [plan], complete, { key: plan.model, purpose: "generate", publish: true, maxCalls: options.maxSections ?? 4, signal: options.signal });
 try {
   const entries = [
     message("user", "Find my past work " + "🔎 \"\\\n".repeat(400)),
@@ -66,7 +68,7 @@ try {
   const resumed = planSummary(index, path, model, 2000);
   assert.equal(resumed.cached, 1, "cache survives process restart");
   const done = await generateSummary(index, resumed, complete, { maxSections: 20 });
-  assert(done.complete);
+  assert.equal(done.published, 1); assert.equal(done.completeSessions, 1);
   assert.equal(calls, initial.sections.length, "resumed section not charged twice");
   const record = readSummary(index.db, path, initial.sourceHash);
   assert.equal(record.status, "ready");
@@ -79,7 +81,7 @@ try {
   assert.equal(searchSessions(index, { query: "semantic", roles: ["generated"], dateField: "message", since: "2020-01-01" }).total, 0);
   assert(formatSummary(record, path).includes("Verify claims"));
   const free = await generateSummary(index, planSummary(index, path, model, 2000), complete);
-  assert.equal(free.generated, 0); assert(free.complete); assert.equal(free.usage.totalTokens, 0);
+  assert.equal(free.generated, 0); assert.equal(free.completeSessions, 1); assert.equal(free.usage.totalTokens, 0);
   assert.equal(planSummary(index, path, "fake/different-model", 2000).cached, 0, "cache keys include model");
   assert(formatSummary(record, path, { limit: 1 }).includes("offset:1"), "summary overview/topic items are paginated");
   assert(!formatSummary(record, path, { limit: 1, offset: 1 }).includes("Section 1 overview"));
@@ -89,7 +91,7 @@ try {
   assert.equal((await index.sync(f.root)).indexed, 0);
   assert.equal(searchSessions(index, { query: "semantic discovery" }).total, 0);
   assert.equal(readSummary(index.db, path, initial.sourceHash).status, "stale");
-  assert((await generateSummary(index, planSummary(index, path, model, 2000), complete)).complete);
+  assert.equal((await generateSummary(index, planSummary(index, path, model, 2000), complete)).published, 1, "version-stale summary republished from cache");
 
   index.reset(); await index.sync(f.root);
   assert.equal(searchSessions(index, { query: "semantic discovery" }).total, 1, "FTS rebuild retains/re-attaches summaries");
@@ -106,23 +108,27 @@ try {
   assert(!staleText.includes("Semantic retrieval"), "stale entry references not presented as current");
   const incremental = planSummary(index, path, model, 2000);
   assert(incremental.cached >= initial.sections.length - 1, "unchanged completed sections reused on append");
-  assert((await generateSummary(index, incremental, complete, { maxSections: 20 })).complete);
+  assert.equal((await generateSummary(index, incremental, complete, { maxSections: 20 })).published, 1);
 
   const bad = planSummary(index, path, "fake/bad-model", 2000);
   const badReply = JSON.parse(reply(bad.sections[0]!.input)); badReply.topics[0].entries = [99999];
   assert.throws(() => parseSummary(JSON.stringify(badReply), bad.sections[0]!), /source references/);
   assert.throws(() => parseSummary("not json", bad.sections[0]!), /valid JSON/);
   const invalid = await generateSummary(index, bad, async () => ({ text: "not json", usage }));
-  assert(invalid.error); assert.equal(invalid.generated, 0); assert.equal(invalid.usage.totalTokens, 30);
+  assert.equal(invalid.failed.length, 4, "failed sections are skipped, not fatal, until the call cap");
+  assert.match(invalid.failed[0]!.error, /valid JSON/); assert.equal(invalid.generated, 0); assert.equal(invalid.usage.totalTokens, 120);
   assert(!cachedSection(index.db, path, bad.sections[0]!.hash, bad.model));
   const failed = await generateSummary(index, bad, async () => ({ text: "", usage, error: "provider failed" }));
-  assert.equal(failed.error, "provider failed"); assert.equal(failed.usage.totalTokens, 30);
+  assert.equal(failed.failed[0]!.error, "provider failed"); assert.equal(failed.usage.totalTokens, 120);
+  const logged = index.db.prepare("SELECT ok, error, input_tokens, input_chars FROM summary_calls WHERE model = ?").all(bad.model) as any[];
+  assert.equal(logged.length, 8, "every billed attempt is logged, including failures");
+  assert(logged.every((row) => !row.ok && row.error && row.input_tokens === 20 && row.input_chars > 0));
 
   const controller = new AbortController();
   const cancelled = await generateSummary(index, bad, async (_system, input) => {
     controller.abort(); return { text: reply(input), usage };
   }, { signal: controller.signal });
-  assert(cancelled.error); assert.equal(cancelled.generated, 0); assert.equal(cancelled.usage.totalTokens, 30);
+  assert.equal(cancelled.stopped, "Cancelled."); assert.equal(cancelled.failed.length, 0); assert.equal(cancelled.generated, 0); assert.equal(cancelled.usage.totalTokens, 30);
   let called = false;
   await generateSummary(index, bad, async () => { called = true; return { text: "" }; }, { signal: controller.signal });
   assert(!called, "pre-aborted work never reaches provider");
@@ -132,7 +138,7 @@ try {
     f.write("summary", "/work/search", [...entries, message("user", "Changed while waiting for model")]);
     return { text: reply(input) };
   });
-  assert(result.error?.includes("Source changed")); assert(!result.complete);
+  assert(result.failed.some((f) => f.error.includes("Source changed"))); assert.equal(result.published, 0);
   rmSync(path); await index.sync(f.root);
   assert.equal(index.db.prepare("SELECT * FROM summaries").all().length, 0);
   assert.equal(index.db.prepare("SELECT * FROM summary_cache").all().length, 0);
