@@ -6,6 +6,7 @@ import { SearchPanel, type PickAction } from "./panel.ts";
 import { formatSyncWarning, prettyPath, resumeCommand } from "./format.ts";
 import { recentSessions, search, type SearchHit } from "./search.ts";
 import { registerSessionTools } from "./tools.ts";
+import { registerSummaryMaintenance } from "./maintenance.ts";
 export { SearchPanel, ResultsList } from "./panel.ts";
 
 function copyToClipboard(text: string): boolean {
@@ -19,8 +20,14 @@ export default function (pi: ExtensionAPI) {
   const shutdown = new AbortController();
   const getIndex = () => index ??= new SessionIndex();
   registerSessionTools(pi, getIndex, shutdown.signal);
+  const maintenance = registerSummaryMaintenance(pi, getIndex);
+  pi.events.on("pi-session-maintenance:capabilities:v1", (data) => {
+    const request = data as { capabilities?: Record<string, unknown> };
+    (request.capabilities ??= {}).summary = { protocol: 1, channel: "pi-session-search:maintenance:v1" };
+  });
   pi.on("session_shutdown", async () => {
     shutdown.abort();
+    await maintenance.stop();
     await index?.dispose();
     index = undefined;
   });

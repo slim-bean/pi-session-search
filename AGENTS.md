@@ -37,8 +37,12 @@ and explicit `session_summarize` tools. Read README.md for the public contract.
 
 ## Summary safety/lifecycle
 
-- Search/read/plan NEVER invoke a model. Only explicit `session_summarize`
-  `action:calibrate|generate` do, via `summary-model.ts`:
+- Search/read/plan NEVER invoke a model. Explicit `session_summarize`
+  `action:calibrate|generate` or a trusted `pi-session-search:maintenance:v1` host
+  run request do, via `summary-model.ts`. The optional maintenance adapter
+  shares the engine/cache, processes one section at concurrency 1, reports usage,
+  checks sourceHash, and cancels on foreground input. Host consent is separate
+  from the model tool's explicit-user-request rules:
   `ctx.modelRegistry.streamSimple(...).result()` with `reasoning` clamped by
   pi-ai `clampThinkingLevel`. Never pass provider-specific options through
   `complete()`: Anthropic ignores `reasoningEffort`, and managed-effort Claude

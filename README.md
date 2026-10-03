@@ -206,6 +206,26 @@ never changed. Normal searches and reads never generate summaries.
   deadline each. Nested usage is returned to pi, including failed attempts.
 - No daemon, embeddings, automatic reranker, or session-file mutation.
 
+## Optional automatic maintenance
+
+`pi-session-maintenance` can be installed separately to authorize idle/background
+summary indexing. This package advertises a process-local capability on
+`pi-session-maintenance:capabilities:v1` and responds on
+`pi-session-search:maintenance:v1`. Without an explicit host request, search/read
+and startup never invoke a model. The manual tool's consent rules are unchanged.
+
+Trusted requests provide `{protocol:1, operation:"status"|"run", context, path,
+sourceHash, model?, signal?, onUsage?, onProgress?, result?}`; the responder assigns
+`result` synchronously. Status returns a schema/model/reasoning key and freshness.
+Run processes at most **one** uncached section, with concurrency **1**, then yields.
+All branches are included, source files are never written, and complete/fresh
+results alone are published. Existing section caches are reused. Foreground input
+cancels adapter generation; shutdown waits for it before closing the shared index.
+Usage callbacks report completed provider responses even if publication is cancelled.
+The coordinator supplies cross-process job ownership and budgets; the in-process
+adapter alone does not lock out independent manual summarization in another pi.
+This is a trusted extension protocol, not an authentication boundary.
+
 ## Interactive picker
 
 ```text
@@ -248,6 +268,7 @@ extension/
   summary-store.ts  versioned cache, freshness, publication, call log
   summarizer.ts     sections, prompt, validation, parallel bounded engine
   summary-model.ts  model resolution, reasoning clamp, streamSimple adapter
+  maintenance.ts    optional idle-host adapter; same summary engine/cache, one call per run
   summary-estimate.ts call stats, cost/time projection, calibration sample
   format.ts         bounded LLM-facing output
 ```
