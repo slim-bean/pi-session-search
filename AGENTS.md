@@ -79,7 +79,7 @@ and explicit `session_summarize` tools. Read README.md for the public contract.
 
 ## Installation and testing
 
-Installed locally via `"../../projects/pi-session-search"` in
+Installed locally via `"../../projects/pi-extensions/pi-session-search"` in
 `~/.pi/agent/settings.json` packages (relative to that file). Never also install
 an extensions-dir symlink. `/reload` picks up changes; reload other running
 pi instances after shared database schema changes too.

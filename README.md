@@ -29,8 +29,11 @@ also symlink the extension into `~/.pi/agent/extensions/`, or it loads twice.
 Local package paths in `~/.pi/agent/settings.json` resolve relative to that file:
 
 ```json
-{ "packages": ["../../projects/pi-session-search"] }
+{ "packages": ["../../projects/pi-extensions/pi-session-search"] }
 ```
+
+**Upgrading to 0.5.0:** includes the idle-maintenance adapter and all 0.4.x
+summary improvements described below.
 
 **Upgrading to 0.4.1:** `SUMMARY_VERSION` 2 (lenient validator, prompt
 wording). Earlier summaries/caches and calibration stats are not reused.
