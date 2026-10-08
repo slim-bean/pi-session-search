@@ -48,17 +48,36 @@ export function resolveSummaryModel(ctx: Pick<ExtensionContext, "model" | "model
   return { model, name: modelName, reasoning, key: `${modelName}@${reasoning}`, maxTokens, sectionChars };
 }
 
-export function summaryCompleter(registry: ExtensionContext["modelRegistry"], summaryModel: SummaryModel, signal?: AbortSignal): CompleteSummary {
+export function summaryCompleter(registry: ExtensionContext["modelRegistry"], summaryModel: SummaryModel, signal?: AbortSignal,
+  onModelEvent?: (event: any) => void, onCompletedUsage?: (usage: any) => void): CompleteSummary {
   return async (systemPrompt, input, callSignal) => {
-    const signals = [signal, callSignal].filter((s): s is AbortSignal => Boolean(s));
-    const response = await registry.streamSimple(summaryModel.model, {
-      systemPrompt, messages: [{ role: "user", content: input, timestamp: Date.now() }],
-    }, {
+    const tracingAbort = new AbortController();
+    const signals = [signal, callSignal, tracingAbort.signal].filter((s): s is AbortSignal => Boolean(s));
+    const messages = [{ role: "user" as const, content: input, timestamp: Date.now() }];
+    onModelEvent?.({ type: "start", provider: summaryModel.model.provider, model: summaryModel.model.id, systemPrompt, messages,
+      reasoning: summaryModel.reasoning === "off" ? undefined : summaryModel.reasoning, maxTokens: summaryModel.maxTokens });
+    const stream = registry.streamSimple(summaryModel.model, { systemPrompt, messages }, {
       signal: AbortSignal.any([...signals, AbortSignal.timeout(SUMMARY_CALL_TIMEOUT_MS)]),
       maxTokens: summaryModel.maxTokens,
       reasoning: summaryModel.reasoning === "off" ? undefined : summaryModel.reasoning,
       sessionId: randomUUID(),
-    }).result();
+    });
+    try {
+      if (onModelEvent && Symbol.asyncIterator in stream) {
+        for await (const event of stream) {
+          if (event.type === "text_delta" || event.type === "thinking_delta") onModelEvent({ type: "delta",
+            channel: event.type === "text_delta" ? "text" : "thinking", delta: event.delta });
+        }
+      }
+    } catch (error) {
+      tracingAbort.abort(error);
+      const final = await stream.result().catch(() => undefined);
+      if (final) onCompletedUsage?.(final.usage);
+      throw error;
+    }
+    const response = await stream.result();
+    onCompletedUsage?.(response.usage);
+    onModelEvent?.({ type: "end", message: response });
     const text = response.content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
     if (response.stopReason === "error" || response.stopReason === "aborted" || response.stopReason === "length") {
       return { text, usage: response.usage, stopReason: response.stopReason, error: response.errorMessage ?? `Summary model stopped: ${response.stopReason}` };

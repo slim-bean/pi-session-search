@@ -32,6 +32,11 @@ Local package paths in `~/.pi/agent/settings.json` resolve relative to that file
 { "packages": ["../../projects/pi-extensions/pi-session-search"] }
 ```
 
+**Upgrading to 0.6.0:** fixes canonical-path/symlink aliases in summary maintenance,
+adds model tracing for coordinator-owned transcripts, and keeps passive maintenance
+inspection from cancelling summary calls. Existing summary caches are retained;
+reload running instances to use the updated adapter.
+
 **Upgrading to 0.5.0:** includes the idle-maintenance adapter and all 0.4.x
 summary improvements described below.
 
@@ -225,9 +230,20 @@ All branches are included, source files are never written, and complete/fresh
 results alone are published. Existing section caches are reused. Foreground input
 cancels adapter generation; shutdown waits for it before closing the shared index.
 Usage callbacks report completed provider responses even if publication is cancelled.
+An optional `onModelEvent` callback supplies exact prompts, parsed text/thinking
+deltas and final assistant responses for a coordinator-owned private transcript;
+no HTTP credentials/options are exposed and source sessions remain untouched.
 The coordinator supplies cross-process job ownership and budgets; the in-process
 adapter alone does not lock out independent manual summarization in another pi.
 This is a trusted extension protocol, not an authentication boundary.
+
+Maintenance resolves canonical source paths back to their indexed aliases (for
+example, a symlinked agent directory or macOS `/var` vs `/private/var`), preserving
+existing paid caches. A genuinely unindexed source reports its path and the scanned
+session root. Discovery scans `<agent-dir>/sessions/<project>/*.jsonl`; sessions
+outside that layout (including custom `--session-dir` locations) are not discovered.
+Check the session location and `PI_CODING_AGENT_DIR` rather than repeatedly retrying.
+Reload older running instances after upgrading this adapter.
 
 ## Interactive picker
 

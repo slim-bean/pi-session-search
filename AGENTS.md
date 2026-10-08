@@ -40,11 +40,16 @@ and explicit `session_summarize` tools. Read README.md for the public contract.
 - Search/read/plan NEVER invoke a model. Explicit `session_summarize`
   `action:calibrate|generate` or a trusted `pi-session-search:maintenance:v1` host
   run request do, via `summary-model.ts`. The optional maintenance adapter
+  maps canonical maintenance paths to existing indexed aliases without changing
+  cache identities, and reports the scan root for genuinely unindexed sources. It
   shares the engine/cache, processes one section at concurrency 1, reports usage,
   checks sourceHash, and cancels on foreground input. Host consent is separate
   from the model tool's explicit-user-request rules:
-  `ctx.modelRegistry.streamSimple(...).result()` with `reasoning` clamped by
-  pi-ai `clampThinkingLevel`. Never pass provider-specific options through
+  `ctx.modelRegistry.streamSimple()` with `reasoning` clamped by
+  pi-ai `clampThinkingLevel`. Optional onModelEvent host callbacks observe parsed
+  deltas plus exact prompts/final responses; manual calls remain unlogged here.
+  Never expose auth/transport options; abort and await a stream if tracing fails.
+  Never pass provider-specific options through
   `complete()`: Anthropic ignores `reasoningEffort`, and managed-effort Claude
   models then default to effort "high" inside the output ceiling.
 - Summarizer receives user/assistant text only, no tools or thinking. Historical
