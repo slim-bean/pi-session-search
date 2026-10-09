@@ -32,6 +32,11 @@ Local package paths in `~/.pi/agent/settings.json` resolve relative to that file
 { "packages": ["../../projects/pi-extensions/pi-session-search"] }
 ```
 
+**Upgrading to 0.7.0:** increases the per-call default deadline to ten minutes,
+accepts maintenance timeout overrides, and records elapsed time and the actual
+abort cause. Summary caches remain compatible. Pair with pi-session-maintenance
+0.4.0 for timeout settings and diagnostics in history/session views.
+
 **Upgrading to 0.6.0:** fixes canonical-path/symlink aliases in summary maintenance,
 adds model tracing for coordinator-owned transcripts, and keeps passive maintenance
 inspection from cancelling summary calls. Existing summary caches are retained;
@@ -210,7 +215,7 @@ never changed. Normal searches and reads never generate summaries.
   summaries stale and remove them from search on sync. A source change during
   generation prevents publication. Cached sections remain reusable; appends
   normally regenerate only the final section.
-- Provider calls are abortable (Esc cancels the tool) and have a three-minute
+- Provider calls are abortable (Esc cancels the tool) and have a ten-minute
   deadline each. Nested usage is returned to pi, including failed attempts.
 - No daemon, embeddings, automatic reranker, or session-file mutation.
 
@@ -223,7 +228,7 @@ summary indexing. This package advertises a process-local capability on
 and startup never invoke a model. The manual tool's consent rules are unchanged.
 
 Trusted requests provide `{protocol:1, operation:"status"|"run", context, path,
-sourceHash, model?, signal?, onUsage?, onProgress?, result?}`; the responder assigns
+sourceHash, model?, modelTimeoutMs?, signal?, onUsage?, onProgress?, result?}`; the responder assigns
 `result` synchronously. Status returns a schema/model/reasoning key and freshness.
 Run processes at most **one** uncached section, with concurrency **1**, then yields.
 All branches are included, source files are never written, and complete/fresh
@@ -233,6 +238,10 @@ Usage callbacks report completed provider responses even if publication is cance
 An optional `onModelEvent` callback supplies exact prompts, parsed text/thinking
 deltas and final assistant responses for a coordinator-owned private transcript;
 no HTTP credentials/options are exposed and source sessions remain untouched.
+Start/end callbacks also record the call deadline; end records include elapsed time
+and the first cancellation cause (or provider-reported abortion). Maintenance hosts
+can override the default ten-minute call deadline with `modelTimeoutMs` (1–3600000).
+`pi-session-maintenance` supplies its `modelTimeoutSeconds` setting.
 The coordinator supplies cross-process job ownership and budgets; the in-process
 adapter alone does not lock out independent manual summarization in another pi.
 This is a trusted extension protocol, not an authentication boundary.

@@ -49,6 +49,9 @@ and explicit `session_summarize` tools. Read README.md for the public contract.
   pi-ai `clampThinkingLevel`. Optional onModelEvent host callbacks observe parsed
   deltas plus exact prompts/final responses; manual calls remain unlogged here.
   Never expose auth/transport options; abort and await a stream if tracing fails.
+  model-deadline.ts tracks the first abort cause, elapsed time and timeout (default
+  600s; maintenance modelTimeoutMs overrides it). Keep native provider messages
+  unchanged; diagnostics are additive end-event fields, not guessed stop causes.
   Never pass provider-specific options through
   `complete()`: Anthropic ignores `reasoningEffort`, and managed-effort Claude
   models then default to effort "high" inside the output ceiling.

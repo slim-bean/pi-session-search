@@ -8,7 +8,7 @@ import { readSummary, SUMMARY_VERSION } from "./summary-store.ts";
 /** Trusted process-local integration; not a model tool or permission boundary. */
 export interface SummaryMaintenanceRequest {
   protocol: 1; operation: "status" | "run"; context: ExtensionContext;
-  path: string; sourceHash: string; model?: string; maxCost?: number;
+  path: string; sourceHash: string; model?: string; maxCost?: number; modelTimeoutMs?: number;
   signal?: AbortSignal; onUsage?: (usage: any) => void; onProgress?: (text: string) => void;
   onModelEvent?: (event: any) => void;
   result?: Promise<unknown>;
@@ -56,7 +56,7 @@ export function registerSummaryMaintenance(pi: ExtensionAPI, getIndex: () => Ses
       try {
         const result = await runSummaries(index, [plan], async (system, input, callSignal) => {
           // Account even if cancellation or transcript failure prevents publication.
-          return summaryCompleter(request.context.modelRegistry, model, signal, request.onModelEvent, request.onUsage)(system, input, callSignal);
+          return summaryCompleter(request.context.modelRegistry, model, signal, request.onModelEvent, request.onUsage, request.modelTimeoutMs)(system, input, callSignal);
         }, {
           key: model.key, purpose: "generate", publish: true, maxCalls: 1, maxCost: request.maxCost,
           concurrency: 1, signal,

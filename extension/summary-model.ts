@@ -8,13 +8,14 @@ import { randomUUID } from "node:crypto";
 import { clampThinkingLevel, type Api, type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { SECTION_CHARS, type CompleteSummary } from "./summarizer.ts";
+import { modelDeadline } from "./model-deadline.ts";
 
 export const SUMMARY_REASONING_LEVELS = ["off", "minimal", "low", "medium", "high"] as const;
 export type SummaryReasoning = typeof SUMMARY_REASONING_LEVELS[number];
 export const DEFAULT_SUMMARY_REASONING: SummaryReasoning = "low";
 /** Ceiling for thinking (adaptive/OpenAI) plus the JSON answer. Only generated tokens are billed. */
 export const SUMMARY_MAX_TOKENS = 8192;
-export const SUMMARY_CALL_TIMEOUT_MS = 180_000;
+export const SUMMARY_CALL_TIMEOUT_MS = 600_000;
 
 export interface SummaryModel {
   model: Model<Api>;
@@ -49,15 +50,16 @@ export function resolveSummaryModel(ctx: Pick<ExtensionContext, "model" | "model
 }
 
 export function summaryCompleter(registry: ExtensionContext["modelRegistry"], summaryModel: SummaryModel, signal?: AbortSignal,
-  onModelEvent?: (event: any) => void, onCompletedUsage?: (usage: any) => void): CompleteSummary {
+  onModelEvent?: (event: any) => void, onCompletedUsage?: (usage: any) => void, timeoutMs = SUMMARY_CALL_TIMEOUT_MS): CompleteSummary {
   return async (systemPrompt, input, callSignal) => {
     const tracingAbort = new AbortController();
     const signals = [signal, callSignal, tracingAbort.signal].filter((s): s is AbortSignal => Boolean(s));
+    const call = modelDeadline(signals, timeoutMs);
     const messages = [{ role: "user" as const, content: input, timestamp: Date.now() }];
     onModelEvent?.({ type: "start", provider: summaryModel.model.provider, model: summaryModel.model.id, systemPrompt, messages,
-      reasoning: summaryModel.reasoning === "off" ? undefined : summaryModel.reasoning, maxTokens: summaryModel.maxTokens });
+      reasoning: summaryModel.reasoning === "off" ? undefined : summaryModel.reasoning, maxTokens: summaryModel.maxTokens, timeoutMs });
     const stream = registry.streamSimple(summaryModel.model, { systemPrompt, messages }, {
-      signal: AbortSignal.any([...signals, AbortSignal.timeout(SUMMARY_CALL_TIMEOUT_MS)]),
+      signal: call.signal,
       maxTokens: summaryModel.maxTokens,
       reasoning: summaryModel.reasoning === "off" ? undefined : summaryModel.reasoning,
       sessionId: randomUUID(),
@@ -73,14 +75,16 @@ export function summaryCompleter(registry: ExtensionContext["modelRegistry"], su
       tracingAbort.abort(error);
       const final = await stream.result().catch(() => undefined);
       if (final) onCompletedUsage?.(final.usage);
-      throw error;
+      throw new Error(call.diagnostics().abortReason ?? String(error));
     }
-    const response = await stream.result();
+    const response = await stream.result().catch(error => { throw new Error(call.diagnostics().abortReason ?? String(error)); });
     onCompletedUsage?.(response.usage);
-    onModelEvent?.({ type: "end", message: response });
+    const diagnostics = call.diagnostics(response.stopReason, response.errorMessage);
+    onModelEvent?.({ type: "end", message: response, ...diagnostics });
     const text = response.content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
-    if (response.stopReason === "error" || response.stopReason === "aborted" || response.stopReason === "length") {
-      return { text, usage: response.usage, stopReason: response.stopReason, error: response.errorMessage ?? `Summary model stopped: ${response.stopReason}` };
+    if (call.signal.aborted || response.stopReason === "error" || response.stopReason === "aborted" || response.stopReason === "length") {
+      return { text, usage: response.usage, stopReason: call.signal.aborted ? "aborted" : response.stopReason,
+        error: diagnostics.abortReason ?? response.errorMessage ?? `Summary model stopped: ${response.stopReason}` };
     }
     return { text, usage: response.usage, stopReason: response.stopReason };
   };

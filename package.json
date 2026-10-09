@@ -1,6 +1,6 @@
 {
   "name": "pi-session-search",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "scripts": {
     "test": "node test/search.ts && node test/reader.ts && node test/summaries.ts && node test/batch.ts && node test/panel.ts && node test/tools.ts && node test/maintenance.ts && node test/observability.ts",
     "test:smoke": "node test/smoke.ts"
