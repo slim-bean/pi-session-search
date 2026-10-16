@@ -86,11 +86,23 @@ try {
   assert(formatSummary(record, path, { limit: 1 }).includes("offset:1"), "summary overview/topic items are paginated");
   assert(!formatSummary(record, path, { limit: 1, offset: 1 }).includes("Section 1 overview"));
 
+  // Batch invalidation handles both stale reasons, preserving fresh generated
+  // rows and lexical content. It must also be harmless on repeated no-op syncs.
+  const sourceStale = f.write("source-stale", "/work/search", [message("user", "source stale lexical")]);
+  const fresh = f.write("fresh", "/work/search", [message("user", "fresh lexical")]);
+  await index.sync(f.root);
+  for (const extra of [sourceStale, fresh]) await generateSummary(index, planSummary(index, extra, model, 2000), complete);
+  index.db.prepare("UPDATE summaries SET source_hash = 'old' WHERE session_path = ?").run(sourceStale);
   // Version invalidation must work even with no source-file changes.
   index.db.prepare("UPDATE summaries SET version = 'old' WHERE session_path = ?").run(path);
-  assert.equal((await index.sync(f.root)).indexed, 0);
-  assert.equal(searchSessions(index, { query: "semantic discovery" }).total, 0);
+  for (let i = 0; i < 2; i++) {
+    assert.equal((await index.sync(f.root)).indexed, 0);
+    assert.deepEqual(searchSessions(index, { query: "semantic discovery" }).hits.map(h => h.path), [fresh]);
+    assert.equal(searchSessions(index, { query: "lexical", roles: ["user"] }).total, 2);
+  }
   assert.equal(readSummary(index.db, path, initial.sourceHash).status, "stale");
+  for (const extra of [sourceStale, fresh]) rmSync(extra);
+  await index.sync(f.root);
   assert.equal((await generateSummary(index, planSummary(index, path, model, 2000), complete)).published, 1, "version-stale summary republished from cache");
 
   index.reset(); await index.sync(f.root);

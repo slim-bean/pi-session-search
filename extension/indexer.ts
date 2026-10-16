@@ -164,9 +164,14 @@ export class SessionIndex {
     for (const path of removed) this.remove(path);
     // A prompt/version change also invalidates generated FTS rows, even when
     // source files haven't changed and therefore aren't reparsed this sync.
-    for (const row of this.db.prepare(`SELECT m.session_path FROM summaries m JOIN sessions s ON s.path = m.session_path
-      WHERE m.version != ? OR m.source_hash != s.conversation_hash`).all(SUMMARY_VERSION) as any[]) {
-      this.db.prepare(`DELETE FROM chunks WHERE session_path = ? AND role = 'generated'`).run(row.session_path);
+    const staleSummaries = `SELECT m.session_path FROM summaries m JOIN sessions s ON s.path = m.session_path
+      WHERE m.version != ? OR m.source_hash != s.conversation_hash`;
+    if (this.db.prepare(`${staleSummaries} LIMIT 1`).get(SUMMARY_VERSION)) {
+      // FTS5 UNINDEXED columns have no lookup index. A delete per stale
+      // manifest scans the entire corpus each time, even after its rows are
+      // gone. Batch all paths into one scan; retain manifests/caches for reads.
+      this.db.prepare(`DELETE FROM chunks WHERE role = 'generated'
+        AND session_path IN (${staleSummaries})`).run(SUMMARY_VERSION);
     }
     // Caches retained by reset() also need cleanup for deleted sessions.
     for (const row of this.db.prepare(`SELECT session_path FROM summaries UNION SELECT session_path FROM summary_cache`).all() as any[]) {
@@ -205,7 +210,8 @@ export class SessionIndex {
         (text, session_path, entry_id, entry_index, role, timestamp_ms, source_refs) VALUES (?, ?, ?, ?, ?, ?, NULL)`);
       insert.run([parsed.name, parsed.cwd, basename(path)].filter(Boolean).join(" "), path, "", 0, "meta", null);
       for (const chunk of parsed.chunks) insert.run(chunk.text, path, chunk.entryId, chunk.entryIndex, chunk.role, chunk.timestampMs);
-      publishSummaryChunks(db, path, parsed.conversationHash);
+      // All old chunks were deleted above; don't scan FTS again to clear generated rows.
+      publishSummaryChunks(db, path, parsed.conversationHash, false);
       db.exec("COMMIT");
     } catch (error) { db.exec("ROLLBACK"); throw error; }
   }

@@ -69,7 +69,10 @@ and explicit `session_summarize` tools. Read README.md for the public contract.
   Changing prompt/schema/segmentation semantics requires bumping that version.
   Only complete manifests matching the indexed conversation hash/version
   enter FTS. Sync also purges version-stale generated rows even if files didn't
-  change. Check the source again before publishing after async model work.
+  change. Batch stale-summary FTS deletion across paths: `session_path` and
+  `role` are FTS `UNINDEXED` fields, so per-path deletes each scan the full corpus.
+  Reindexing already deletes all old chunks; skip the publisher's redundant clear.
+  Check the source again before publishing after async model work.
 - `runSummaries` is the single engine (one session or a scope): bounded
   concurrency, call cap, approximate cost ceiling (learn one call's cost
   before fanning out), skip-and-log failed sections, stop after 5 consecutive

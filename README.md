@@ -32,6 +32,10 @@ Local package paths in `~/.pi/agent/settings.json` resolve relative to that file
 { "packages": ["../../projects/pi-extensions/pi-session-search"] }
 ```
 
+**Upgrading to 0.8.0:** reduces sync CPU by batching stale-summary FTS cleanup
+and avoiding a redundant cleanup scan during reindexing. No schema migration;
+existing summary caches are retained. Reload running instances to pick up the fix.
+
 **Upgrading to 0.7.0:** increases the per-call default deadline to ten minutes,
 accepts maintenance timeout overrides, and records elapsed time and the actual
 abort cause. Summary caches remain compatible. Pair with pi-session-maintenance
@@ -276,7 +280,9 @@ it like your session files. Deleting it is safe but discards paid-for summaries.
 `--rebuild` preserves summary caches and reattaches fresh summaries.
 
 SQLite FTS5 supplies the inverted keyword index, Porter stemming, BM25
-ranking, and prefix indexes. Files sync by mtime + size. Unreadable/malformed
+ranking, and prefix indexes. Files sync by mtime + size. Stale-summary cleanup
+batches paths into one FTS scan (FTS `UNINDEXED` fields have no lookup index),
+and reindexing avoids a redundant generated-row cleanup scan. Unreadable/malformed
 files are reported rather than silently discarded; unavailable session roots
 fail without deleting the existing index. **All** indexed text
 is retained (the old 16,000-character cutoff is gone); tools/thinking are

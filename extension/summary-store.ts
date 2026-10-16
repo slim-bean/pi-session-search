@@ -103,9 +103,9 @@ export function readSummary(db: DatabaseSync, path: string, sourceHash: string):
   };
 }
 
-/** Caller owns the transaction. Only complete, fresh summaries enter FTS. */
-export function publishSummaryChunks(db: DatabaseSync, path: string, sourceHash: string): void {
-  db.prepare(`DELETE FROM chunks WHERE session_path = ? AND role = 'generated'`).run(path);
+/** Caller owns the transaction. Skip clearing only if it already deleted all old chunks. */
+export function publishSummaryChunks(db: DatabaseSync, path: string, sourceHash: string, clearExisting = true): void {
+  if (clearExisting) db.prepare(`DELETE FROM chunks WHERE session_path = ? AND role = 'generated'`).run(path);
   const record = readSummary(db, path, sourceHash);
   if (record.status !== "ready") return;
   const insert = db.prepare(`INSERT INTO chunks
