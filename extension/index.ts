@@ -33,6 +33,11 @@ export default function (pi: ExtensionAPI) {
   });
   pi.registerCommand("session-search", {
     description: "Search all pi sessions across every project (--rebuild to reindex; preserves generated summaries)",
+    getArgumentCompletions(prefix) {
+      return "--rebuild".startsWith(prefix.trimStart())
+        ? [{ value: "--rebuild", label: "--rebuild", description: "Reindex sessions without deleting generated summaries" }]
+        : null;
+    },
     handler: async (args, ctx) => {
       if (ctx.mode !== "tui") {
         ctx.ui.notify("/session-search needs interactive mode; use session_search instead", "error"); return;
